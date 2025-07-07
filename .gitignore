@@ -1,3 +1,4 @@
+*.ncu-rep
 *.i
 *.ii
 *.gpu
