@@ -4,5 +4,4 @@
 *.ptx
 *.cubin
 *.fatbin
-*.fatbin
 *.ncu-rep
