@@ -5,3 +5,7 @@
 *.cubin
 *.fatbin
 *.ncu-rep
+ncu
+.vscode
+bin
+obj
