@@ -128,8 +128,8 @@ __global__ void index_shapes(int *img_array, int dsize, int *ones,
 
 struct MinResult {
   int distance;
-  int one_idx;
-  int two_idx;
+  int a_idx;
+  int b_idx;
 };
 
 __device__ __forceinline__ MinResult
@@ -137,58 +137,59 @@ warp_shuffle_reduction(MinResult min_result) {
   unsigned mask = 0xFFFFFFFFU;
   for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
     int new_distance = __shfl_down_sync(mask, min_result.distance, offset);
-    int new_one_idx = __shfl_down_sync(mask, min_result.one_idx, offset);
-    int new_two_idx = __shfl_down_sync(mask, min_result.two_idx, offset);
+    int new_a_idx = __shfl_down_sync(mask, min_result.a_idx, offset);
+    int new_b_idx = __shfl_down_sync(mask, min_result.b_idx, offset);
     if (new_distance < min_result.distance) {
       min_result.distance = new_distance;
-      min_result.one_idx = new_one_idx;
-      min_result.two_idx = new_two_idx;
+      min_result.a_idx = new_a_idx;
+      min_result.b_idx = new_b_idx;
     }
   }
   return min_result;
 }
 
-__global__ void min_distances(int *ones, int *twos, int num_ones, int num_twos,
+__global__ void min_distances(int *as, int *bs, int num_as, int num_bs,
                               int img_width, MinResult *block_results) {
-  int idx = threadIdx.x + blockDim.x * blockIdx.x;
-  __shared__ int s_two_idxs[THREADS_PER_BLOCK];
-  __shared__ int s_x2s[THREADS_PER_BLOCK];
-  __shared__ int s_y2s[THREADS_PER_BLOCK];
-  int min_one_idx, x1, y1;
-  int min_two_idx = -1;
-  int min_distance = INT_MAX;
+  int tid = threadIdx.x + blockDim.x * blockIdx.x;
+  __shared__ union {
+    int bs[THREADS_PER_BLOCK];
+    MinResult min_results[WARP_SIZE];
+  } smem;
+  __shared__ int s_b_xs[THREADS_PER_BLOCK];
+  __shared__ int s_b_ys[THREADS_PER_BLOCK];
+  int min_a_idx, min_b_idx = -1, a_x, b_y, min_distance = INT_MAX;
 
-  if (idx < num_ones) {
-    min_one_idx = ones[idx];
-    x1 = min_one_idx % img_width;
-    y1 = min_one_idx / img_width;
+  if (tid < num_as) {
+    min_a_idx = as[tid];
+    a_x = min_a_idx % img_width;
+    b_y = min_a_idx / img_width;
   }
-  // Loop over all twos in blocks, loading into shared memory. Each thread finds its closest two.
-  for (int block = 0; block < (num_twos + blockDim.x - 1) / blockDim.x;
-       ++block) {
-    int twos_index = block * blockDim.x + threadIdx.x;
-    if (twos_index < num_twos) {
-      int two = twos[twos_index];
-      s_two_idxs[threadIdx.x] = two;
-      s_x2s[threadIdx.x] = two % img_width;
-      s_y2s[threadIdx.x] = two / img_width;
+  // Loop over all twos in blocks, loading into shared memory. Each thread finds
+  // its closest two.
+  for (int block = 0; block < (num_bs + blockDim.x - 1) / blockDim.x; ++block) {
+    int b_idx = block * blockDim.x + threadIdx.x;
+    if (b_idx < num_bs) {
+      int b = bs[b_idx];
+      smem.bs[threadIdx.x] = b;
+      s_b_xs[threadIdx.x] = b % img_width;
+      s_b_ys[threadIdx.x] = b / img_width;
     } else
-      s_two_idxs[threadIdx.x] = -1;
+      smem.bs[threadIdx.x] = -1;
     __syncthreads();
 
-    if (idx < num_ones) {
+    if (tid < num_as) {
       for (int j = 0; j < THREADS_PER_BLOCK; ++j) {
-        if (block * blockDim.x + j == num_twos)
+        if (block * blockDim.x + j == num_bs)
           break;
-        int two_idx = s_two_idxs[j];
-        int x2 = s_x2s[j];
-        int y2 = s_y2s[j];
-        int d1 = x2 - x1;
-        int d2 = y2 - y1;
-        int distance = d1 * d1 + d2 * d2;
+        int two_idx = smem.bs[j];
+        int b_x = s_b_xs[j];
+        int b_y = s_b_ys[j];
+        int dx = b_x - a_x;
+        int dy = b_y - b_y;
+        int distance = dx * dx + dy * dy;
         if (distance < min_distance) {
           min_distance = distance;
-          min_two_idx = two_idx;
+          min_b_idx = two_idx;
         }
       }
     }
@@ -196,29 +197,28 @@ __global__ void min_distances(int *ones, int *twos, int num_ones, int num_twos,
   }
 
   // Warp shuffle reduction
-  __shared__ MinResult s_min_results[WARP_SIZE];
   int lane = threadIdx.x % warpSize;
   int warpID = threadIdx.x / warpSize;
   MinResult min_result;
   min_result.distance = min_distance;
-  min_result.one_idx = min_one_idx;
-  min_result.two_idx = min_two_idx;
+  min_result.a_idx = min_a_idx;
+  min_result.b_idx = min_b_idx;
 
-  // First warp reduction
+  // First warp reduction. All warps.
   min_result = warp_shuffle_reduction(min_result);
   if (lane == 0)
-    s_min_results[warpID] = min_result;
+    smem.min_results[warpID] = min_result;
   __syncthreads();
 
-  // Second warp reduction
+  // Second warp reduction. First warp only.
   if (warpID == 0) {
     if (threadIdx.x < blockDim.x / warpSize)
-      min_result = s_min_results[lane];
+      min_result = smem.min_results[lane];
     else
       min_result.distance = INT_MAX;
     min_result = warp_shuffle_reduction(min_result);
 
-    // Write results to global memory
+    // Write results to global memory. First thread of first warp only.
     if (threadIdx.x == 0)
       block_results[blockIdx.x] = min_result;
   }
@@ -294,41 +294,34 @@ int main() {
 
   int num_blocks_reduction =
       (*h_num_ones + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-  MinResult *block_results;
-  cudaMalloc(&block_results, sizeof(MinResult) * num_blocks_reduction);
+  MinResult *d_block_results;
+  cudaMalloc(&d_block_results, sizeof(MinResult) * num_blocks_reduction);
   cudaCheckErrors("cudaMalloc block_results error");
   min_distances<<<num_blocks_reduction, THREADS_PER_BLOCK>>>(
-      d_ones, d_twos, *h_num_ones, *h_num_twos, img_size, block_results);
+      d_ones, d_twos, *h_num_ones, *h_num_twos, img_size, d_block_results);
   cudaCheckErrors("min_distances kernel launch error");
 
-  // DO THIS FINAL REDUCTION ON GPU
-  int h_accum_ones[num_blocks_reduction];
-  int h_accum_twos[num_blocks_reduction];
-  int h_distances[num_blocks_reduction];
-  // cudaMemcpy(h_accum_ones, d_accum_ones, num_blocks_reduction * sizeof(int),
-  //  cudaMemcpyDeviceToHost);
-  // cudaCheckErrors("cudaMemcpy h_accum_ones error");
-  // cudaMemcpy(h_accum_twos, d_accum_twos, num_blocks_reduction * sizeof(int),
-  //  cudaMemcpyDeviceToHost);
-  // cudaCheckErrors("cudaMemcpy h_accum_twos error");
-  // cudaMemcpy(h_distances, d_accum_dist, num_blocks_reduction * sizeof(int),
-  //  cudaMemcpyDeviceToHost);
-  // cudaCheckErrors("cudaMemcpy h_distances error");
+  MinResult h_block_results[num_blocks_reduction];
+  cudaMemcpy(h_block_results, d_block_results,
+             sizeof(MinResult) * num_blocks_reduction, cudaMemcpyDeviceToHost);
+  cudaCheckErrors("cudaMemcpy h_block_results error");
 
-  int min_one_idx = -1;
-  int min_two_idx = -1;
-  int min_distance = INT_MAX;
+  // DO THIS FINAL REDUCTION ON GPU
+  MinResult min_result;
+  min_result.a_idx = -1;
+  min_result.b_idx = -1;
+  min_result.distance = INT_MAX;
   for (int i = 0; i < num_blocks_reduction; ++i) {
-    if (h_distances[i] < min_distance) {
-      min_distance = h_distances[i];
-      min_one_idx = h_accum_ones[i];
-      min_two_idx = h_accum_twos[i];
+    if (h_block_results[i].distance < min_result.distance) {
+      min_result.distance = h_block_results[i].distance;
+      min_result.a_idx = h_block_results[i].a_idx;
+      min_result.b_idx = h_block_results[i].b_idx;
     }
   }
 
   // REMEMBER TO CONVERT FROM 1D INDEX TO 2D
-  printf("Distance: %d\nIndex 1: %d\nIndex 2: %d\n", min_distance, min_one_idx,
-         min_two_idx);
+  printf("Distance: %d\nIndex 1: %d\nIndex 2: %d\n", min_result.distance,
+         min_result.a_idx, min_result.b_idx);
 
   delete[] image;
 }
