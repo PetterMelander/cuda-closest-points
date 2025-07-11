@@ -42,16 +42,16 @@ __device__ void flush_buffer_final(int *s_buffer, int s_count, int *g_buffer,
   }
 }
 
-__global__ void index_shapes(int *img_array, int dsize, int *ones,
-                             int *ones_count, int *twos, int *twos_count) {
-  __shared__ int s_ones[TILE_SIZE];
-  __shared__ int s_twos[TILE_SIZE];
-  __shared__ int s_num_ones;
-  __shared__ int s_num_twos;
+__global__ void index_shapes(int *img_array, int dsize, int *as,
+                             int *num_as, int *bs, int *num_bs) {
+  __shared__ int s_as[TILE_SIZE];
+  __shared__ int s_bs[TILE_SIZE];
+  __shared__ int s_num_as;
+  __shared__ int s_num_bs;
 
   if (threadIdx.x == 0) {
-    s_num_ones = 0;
-    s_num_twos = 0;
+    s_num_as = 0;
+    s_num_bs = 0;
   }
   __syncthreads();
 
@@ -60,42 +60,42 @@ __global__ void index_shapes(int *img_array, int dsize, int *ones,
   while (block_base_idx < dsize) {
     int my_idx = block_base_idx + threadIdx.x;
     int my_value = -1;
-    int write_idx_ones = -1;
-    int write_idx_twos = -1;
+    int write_idx_as = -1;
+    int write_idx_bs = -1;
 
     if (my_idx < dsize) {
       my_value = img_array[my_idx];
     }
 
     if (my_value == 1) {
-      write_idx_ones = atomicAdd(&s_num_ones, 1);
-      if (write_idx_ones < TILE_SIZE) {
-        s_ones[write_idx_ones] = my_idx;
+      write_idx_as = atomicAdd(&s_num_as, 1);
+      if (write_idx_as < TILE_SIZE) {
+        s_as[write_idx_as] = my_idx;
       }
     } else if (my_value == 2) {
-      write_idx_twos = atomicAdd(&s_num_twos, 1);
-      if (write_idx_twos < TILE_SIZE) {
-        s_twos[write_idx_twos] = my_idx;
+      write_idx_bs = atomicAdd(&s_num_bs, 1);
+      if (write_idx_bs < TILE_SIZE) {
+        s_bs[write_idx_bs] = my_idx;
       }
     }
 
     __syncthreads();
 
-    bool needs_flush_ones = s_num_ones >= TILE_SIZE;
-    bool needs_flush_twos = s_num_twos >= TILE_SIZE;
+    bool needs_flush_as = s_num_as >= TILE_SIZE;
+    bool needs_flush_bs = s_num_bs >= TILE_SIZE;
 
-    if (needs_flush_ones) {
-      flush_buffer(s_ones, s_num_ones, ones, ones_count);
+    if (needs_flush_as) {
+      flush_buffer(s_as, s_num_as, as, num_as);
     }
-    if (needs_flush_twos) {
-      flush_buffer(s_twos, s_num_twos, twos, twos_count);
+    if (needs_flush_bs) {
+      flush_buffer(s_bs, s_num_bs, bs, num_bs);
     }
 
-    if (needs_flush_ones && write_idx_ones >= TILE_SIZE) {
-      s_ones[write_idx_ones - TILE_SIZE] = my_idx;
+    if (needs_flush_as && write_idx_as >= TILE_SIZE) {
+      s_as[write_idx_as - TILE_SIZE] = my_idx;
     }
-    if (needs_flush_twos && write_idx_twos >= TILE_SIZE) {
-      s_twos[write_idx_twos - TILE_SIZE] = my_idx;
+    if (needs_flush_bs && write_idx_bs >= TILE_SIZE) {
+      s_bs[write_idx_bs - TILE_SIZE] = my_idx;
     }
 
     __syncthreads();
@@ -103,6 +103,6 @@ __global__ void index_shapes(int *img_array, int dsize, int *ones,
     block_base_idx += gridDim.x * blockDim.x;
   }
 
-  flush_buffer_final(s_ones, s_num_ones, ones, ones_count);
-  flush_buffer_final(s_twos, s_num_twos, twos, twos_count);
+  flush_buffer_final(s_as, s_num_as, as, num_as);
+  flush_buffer_final(s_bs, s_num_bs, bs, num_bs);
 }

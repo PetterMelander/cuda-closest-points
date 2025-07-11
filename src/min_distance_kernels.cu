@@ -46,15 +46,41 @@ __device__ __forceinline__ void warp_shuffle_reduction(MinResult min_result,
 
   // Second warp reduction. First warp only.
   if (warpID == 0) {
-    if (threadIdx.x < blockDim.x / warpSize)
+    if (lane < blockDim.x / warpSize)
       min_result = smem[lane];
     else
       min_result.distance = INT_MAX;
     min_result = single_warp_shuffle_reduction(min_result);
 
     // Write results to global memory. First thread of first warp only.
-    if (threadIdx.x == 0)
+    if (lane == 0)
       output[blockIdx.x] = min_result;
+  }
+}
+
+__device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
+                                                          MinResult *smem,
+                                                          MinResult *output) {
+  int lane = (threadIdx.x + blockDim.x * threadIdx.y) % warpSize;
+  int warpID = (threadIdx.x + blockDim.x * threadIdx.y) / warpSize;
+
+  // First warp reduction. All warps.
+  min_result = single_warp_shuffle_reduction(min_result);
+  if (lane == 0)
+    smem[warpID] = min_result;
+  __syncthreads();
+
+  // Second warp reduction. First warp only.
+  if (warpID == 0) {
+    if (lane < blockDim.x * blockDim.y / warpSize)
+      min_result = smem[lane];
+    else
+      min_result.distance = INT_MAX;
+    min_result = single_warp_shuffle_reduction(min_result);
+
+    // Write results to global memory. First thread of first warp only.
+    if (lane == 0)
+      output[blockIdx.x + blockIdx.y * gridDim.x] = min_result;
   }
 }
 
@@ -120,9 +146,9 @@ __global__ void final_reduction(MinResultSingleIndex *input, int num_elements,
   warp_shuffle_reduction(min_result, smem, output);
 }
 
-__global__ void min_distances_thread_per_one(int *as, int *bs, int num_as,
-                                             int num_bs, int img_width,
-                                             MinResult *block_results) {
+__global__ void min_distances_thread_per_a(int *as, int *bs, int num_as,
+                                           int num_bs, int img_width,
+                                           MinResult *block_results) {
   int tid = threadIdx.x + blockDim.x * blockIdx.x;
   __shared__ union {
     int bs[THREADS_PER_BLOCK];
@@ -130,30 +156,32 @@ __global__ void min_distances_thread_per_one(int *as, int *bs, int num_as,
   } smem;
   __shared__ int s_b_xs[THREADS_PER_BLOCK];
   __shared__ int s_b_ys[THREADS_PER_BLOCK];
-  int min_a_idx, min_b_idx = -1, a_x, a_y, min_distance = INT_MAX;
+  int my_a_linear_coord, min_b_linear_coord = -1, a_x, a_y,
+                         min_distance = INT_MAX;
 
   if (tid < num_as) {
-    min_a_idx = as[tid];
-    a_x = min_a_idx % img_width;
-    a_y = min_a_idx / img_width;
+    my_a_linear_coord = as[tid];
+    a_x = my_a_linear_coord % img_width;
+    a_y = my_a_linear_coord / img_width;
   }
-  // Loop over all twos in blocks, loading into shared memory. Each thread finds
-  // its closest two.
-  for (int block = 0; block < (num_bs + blockDim.x - 1) / blockDim.x; ++block) {
-    int b_idx = block * blockDim.x + threadIdx.x;
+  // Loop over all bs in blocks, loading into shared memory. Each thread finds
+  // its closest b.
+  for (int b_block = 0; b_block < (num_bs + blockDim.x - 1) / blockDim.x;
+       ++b_block) {
+    int b_idx = b_block * blockDim.x + threadIdx.x;
     if (b_idx < num_bs) {
-      int b = bs[b_idx];
-      smem.bs[threadIdx.x] = b;
-      s_b_xs[threadIdx.x] = b % img_width;
-      s_b_ys[threadIdx.x] = b / img_width;
+      int b_linear_coord = bs[b_idx];
+      smem.bs[threadIdx.x] = b_linear_coord;
+      s_b_xs[threadIdx.x] = b_linear_coord % img_width;
+      s_b_ys[threadIdx.x] = b_linear_coord / img_width;
     }
     __syncthreads();
 
     if (tid < num_as) {
-      for (int j = 0; j < THREADS_PER_BLOCK; ++j) {
-        if (block * blockDim.x + j == num_bs)
+      for (int j = 0; j < blockDim.x; ++j) {
+        if (b_block * blockDim.x + j == num_bs)
           break;
-        int two_idx = smem.bs[j];
+        int b_linear_coord = smem.bs[j];
         int b_x = s_b_xs[j];
         int b_y = s_b_ys[j];
         int dx = b_x - a_x;
@@ -161,7 +189,7 @@ __global__ void min_distances_thread_per_one(int *as, int *bs, int num_as,
         int distance = dx * dx + dy * dy;
         if (distance < min_distance) {
           min_distance = distance;
-          min_b_idx = two_idx;
+          min_b_linear_coord = b_linear_coord;
         }
       }
     }
@@ -170,8 +198,8 @@ __global__ void min_distances_thread_per_one(int *as, int *bs, int num_as,
 
   MinResult min_result;
   min_result.distance = min_distance;
-  min_result.a_idx = min_a_idx;
-  min_result.b_idx = min_b_idx;
+  min_result.a_idx = my_a_linear_coord;
+  min_result.b_idx = min_b_linear_coord;
   warp_shuffle_reduction(min_result, smem.min_results, block_results);
 }
 
@@ -193,6 +221,7 @@ __global__ void
 min_distances_thread_per_pair(int2 *points_a, int2 *points_b, int num_as,
                               int num_bs, int img_width,
                               MinResultSingleIndex *block_results) {
+
   int tid = threadIdx.x + blockDim.x * blockIdx.x;
   int grid_size = blockDim.x * gridDim.x;
   int num_pairs = num_as * num_bs;
@@ -201,7 +230,7 @@ min_distances_thread_per_pair(int2 *points_a, int2 *points_b, int num_as,
 
   for (int i = tid; i < num_pairs; i += grid_size) {
     int2 point_a = points_a[i % num_as];
-    int2 point_b = points_b[i / num_as];
+    int2 point_b = points_b[i / num_as]; // TODO: uncoalesced memory access
     int dx = point_b.x - point_a.x;
     int dy = point_b.y - point_a.y;
     int distance = dx * dx + dy * dy;
@@ -217,4 +246,58 @@ min_distances_thread_per_pair(int2 *points_a, int2 *points_b, int num_as,
   min_result.idx = min_global_idx;
   __shared__ MinResultSingleIndex smem[WARP_SIZE];
   warp_shuffle_reduction(min_result, smem, block_results);
+}
+
+__global__ void min_distances_thread_per_pair_v2(int2 *points_a, int2 *points_b,
+                                                 int num_as, int num_bs,
+                                                 int img_width,
+                                                 MinResult *block_results) {
+
+  // __shared__ int2 s_as[16];
+  // __shared__ int2 s_bs[16];
+
+  // Grid stride 2d
+  int min_distance = INT_MAX;
+  int min_x_idx = -1;
+  int min_y_idx = -1;
+  for (int i = blockIdx.x; i < (num_as + blockDim.x - 1) / blockDim.x;
+       i += gridDim.x) {
+    int x_idx = i * blockDim.x + threadIdx.x;
+
+    // First warp loads as (trivially coalesced)
+    // if (threadIdx.y == 0 && x_idx < num_as)
+    // s_as[threadIdx.x] = points_a[x_idx];
+    int2 my_a = points_a[x_idx];
+
+    for (int j = blockIdx.y; j < (num_bs + blockDim.y - 1) / blockDim.y;
+         j += gridDim.y) {
+      int y_idx = j * blockDim.y + threadIdx.y;
+
+      // Second warp loads bs, coalesced
+      // if (threadIdx.y == 2) {
+      //   int y = j * blockDim.y + threadIdx.x;
+      //   if (y < num_bs)
+      //     s_bs[threadIdx.x] = points_b[y];
+      // }
+      // __syncthreads();
+
+      if (x_idx < num_as && y_idx < num_bs) {
+        // int2 my_a = s_as[threadIdx.x];
+        // int2 my_b = s_bs[threadIdx.y];
+        int2 my_b = points_b[y_idx];
+        int dx = my_b.x - my_a.x;
+        int dy = my_b.y - my_a.y;
+        int distance = dx * dx + dy * dy;
+        if (distance < min_distance) {
+          min_distance = distance;
+          min_x_idx = x_idx;
+          min_y_idx = y_idx;
+        }
+      }
+    }
+  }
+
+  __shared__ MinResult results[WARP_SIZE];
+  MinResult min_result{min_distance, min_x_idx, min_y_idx};
+  warp_shuffle_reduction_2d(min_result, results, block_results);
 }

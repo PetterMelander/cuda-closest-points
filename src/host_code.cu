@@ -1,58 +1,44 @@
-#include "../include/kernels.cuh"
 #include "../include/host_code.cuh"
+#include "../include/kernels.cuh"
 #include <algorithm>
+#include <climits>
+#include <cmath>
+#include <stdexcept>
 #include <tuple>
 
-std::tuple<int, int> launch_index_shapes(int *h_image, int img_height,
-                                         int img_width, int *d_as, int *d_bs) {
+std::tuple<int, int> launch_index_shapes(const int *const h_image,
+                                         const int img_height,
+                                         const int img_width, int *d_as,
+                                         int *d_bs) {
   int total_pixels = img_height * img_width;
-  int *d_image, *d_num_ones, *d_num_twos, h_num_as, h_num_bs;
-  cudaMalloc(&d_image, total_pixels * sizeof(int));
-  cudaCheckErrors("cudaMalloc d_image error");
-  cudaMalloc(&d_num_ones, sizeof(int));
-  cudaCheckErrors("cudaMalloc d_num_ones error");
-  cudaMalloc(&d_num_twos, sizeof(int));
-  cudaCheckErrors("cudaMalloc d_num_twos error");
+  int *d_image, *d_num_as, *d_num_bs, h_num_as, h_num_bs;
+  CUDA_CHECK(cudaMalloc(&d_image, total_pixels * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_num_as, sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_num_bs, sizeof(int)));
 
-  cudaMemcpy(d_image, h_image, total_pixels * sizeof(int),
-             cudaMemcpyHostToDevice);
-  cudaCheckErrors("cudaMemcpy d_image error");
-  cudaMemset(d_num_ones, 0, sizeof(int));
-  cudaCheckErrors("cudaMemset d_num_ones error");
-  cudaMemset(d_num_twos, 0, sizeof(int));
-  cudaCheckErrors("cudaMemset d_num_twos error");
+  CUDA_CHECK(cudaMemcpy(d_image, h_image, total_pixels * sizeof(int),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(d_num_as, 0, sizeof(int)));
+  CUDA_CHECK(cudaMemset(d_num_bs, 0, sizeof(int)));
 
-  // TODO: separate function for number of blocks
-  int device_id;
-  cudaGetDevice(&device_id);
-  cudaDeviceProp props;
-  cudaGetDeviceProperties(&props, device_id);
+  int num_blocks = num_blocks_max_occupancy(index_shapes, THREADS_PER_BLOCK,
+                                            sizeof(int) * 2048 * 2, 2.0f);
+  index_shapes<<<num_blocks, THREADS_PER_BLOCK>>>(d_image, total_pixels, d_as,
+                                                  d_num_as, d_bs, d_num_bs);
+  CUDA_CHECK(cudaGetLastError());
 
-  const size_t shared_mem_per_block = sizeof(int) * 2048 * 2;
-
-  int max_active_blocks_per_sm;
-  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_active_blocks_per_sm,
-                                                index_shapes, THREADS_PER_BLOCK,
-                                                shared_mem_per_block);
-
-  const int oversubscription_factor = 2;
-  int num_blocks_indexing = props.multiProcessorCount *
-                            max_active_blocks_per_sm * oversubscription_factor;
-  index_shapes<<<num_blocks_indexing, THREADS_PER_BLOCK>>>(
-      d_image, total_pixels, d_as, d_num_ones, d_bs, d_num_twos);
-  cudaCheckErrors("index_shapes kernel launch error");
-  cudaMemcpy(&h_num_as, d_num_ones, sizeof(int), cudaMemcpyDeviceToHost);
-  cudaCheckErrors("cudaMemcpy h_num_ones error");
-  cudaMemcpy(&h_num_bs, d_num_twos, sizeof(int), cudaMemcpyDeviceToHost);
-  cudaCheckErrors("cudaMemcpy h_num_twos error");
-
-  cudaFree(d_image);
-  delete[] h_image;
+  CUDA_CHECK(
+      cudaMemcpy(&h_num_as, d_num_as, sizeof(int), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(
+      cudaMemcpy(&h_num_bs, d_num_bs, sizeof(int), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaFree(d_image));
+  CUDA_CHECK(cudaFree(d_num_as));
+  CUDA_CHECK(cudaFree(d_num_bs));
 
   return std::tuple<int, int>{h_num_as, h_num_bs};
 }
 
-Pair launch_min_pair_thread_per_a(int num_as, int num_bs, int img_width,
+Pair launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
                                   int *d_as, int *d_bs) {
 
   // Kernel parallelizes over a's. Launch kernel with the larger mask as a.
@@ -65,106 +51,173 @@ Pair launch_min_pair_thread_per_a(int num_as, int num_bs, int img_width,
   int num_blocks = (num_as + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
   MinResult *d_results;
-  cudaMalloc(&d_results, sizeof(MinResult) * num_blocks);
-  cudaCheckErrors("cudaMalloc block_results error");
+  CUDA_CHECK(cudaMalloc(&d_results, sizeof(MinResult) * num_blocks));
 
-  min_distances_thread_per_one<<<num_blocks, THREADS_PER_BLOCK>>>(
+  min_distances_thread_per_a<<<num_blocks, THREADS_PER_BLOCK>>>(
       d_as, d_bs, num_as, num_bs, img_width, d_results);
-  cudaCheckErrors("min_distances_thread_per_one kernel launch error");
+  CUDA_CHECK(cudaGetLastError());
 
-  final_reduction<<<1, 1024>>>(d_results, num_blocks, d_results);
-  cudaCheckErrors("final_reduction kernel launch error");
+  // Do final reduction on cpu
+  MinResult h_min_results[num_blocks];
+  CUDA_CHECK(cudaMemcpy(&h_min_results, d_results,
+                        sizeof(MinResult) * num_blocks,
+                        cudaMemcpyDeviceToHost));
 
-  MinResult h_min_result;
-  cudaMemcpy(&h_min_result, d_results, sizeof(MinResult),
-             cudaMemcpyDeviceToHost);
-  cudaCheckErrors("h_min_result cudaMemcpy error");
+  MinResult min_result{INT_MAX, -1, -1};
+  for (int i = 0; i < num_blocks; ++i) {
+    MinResult result = h_min_results[i];
+    if (result.distance < min_result.distance)
+      min_result = result;
+  }
 
-  cudaFree(d_results);
-  cudaCheckErrors("d_block_results cudaFree error");
+  CUDA_CHECK(cudaFree(d_results));
 
   if (swapped) {
-    std::swap(h_min_result.a_idx, h_min_result.b_idx);
+    std::swap(min_result.a_idx, min_result.b_idx);
   }
   Pair result;
-  result.distance = h_min_result.distance;
-  result.ax = h_min_result.a_idx % img_width;
-  result.ay = h_min_result.a_idx / img_width;
-  result.bx = h_min_result.b_idx % img_width;
-  result.by = h_min_result.b_idx / img_width;
+  result.distance = std::sqrt(min_result.distance);
+  result.ax = min_result.a_idx % img_width;
+  result.ay = min_result.a_idx / img_width;
+  result.bx = min_result.b_idx % img_width;
+  result.by = min_result.b_idx / img_width;
   return result;
 }
 
-Pair launch_min_pair_thread_per_pair(int num_as, int num_bs, int img_width,
-                                     int *d_as, int *d_bs) {
-  int num_blocks = 256; // TODO: fix
+Pair launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
+                                     const int img_width, int *d_as,
+                                     int *d_bs) {
+  int num_blocks =
+      num_blocks_max_occupancy(min_distances_thread_per_pair, THREADS_PER_BLOCK,
+                               sizeof(MinResultSingleIndex) * WARP_SIZE, 2.0f);
 
   MinResultSingleIndex *d_results;
-  cudaMalloc(&d_results, sizeof(MinResultSingleIndex) * num_blocks);
-  cudaCheckErrors("cudaMalloc d_block_results error");
+  CUDA_CHECK(cudaMalloc(&d_results, sizeof(MinResultSingleIndex) * num_blocks));
 
   int2 *d_points_a, *d_points_b;
-  cudaMalloc(&d_points_a, sizeof(int2) * num_as);
-  cudaCheckErrors("cudaMalloc d_points_a error");
-  cudaMalloc(&d_points_b, sizeof(int2) * num_bs);
-  cudaCheckErrors("cudaMalloc d_points_b error");
+  CUDA_CHECK(cudaMalloc(&d_points_a, sizeof(int2) * num_as));
+  CUDA_CHECK(cudaMalloc(&d_points_b, sizeof(int2) * num_bs));
   make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b);
 
   min_distances_thread_per_pair<<<num_blocks, THREADS_PER_BLOCK>>>(
       d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
-  cudaCheckErrors("min_distances_thread_per_pair kernel launch error");
+  CUDA_CHECK(cudaGetLastError());
 
-  final_reduction<<<1, 1024>>>(d_results, num_blocks, d_results);
-  cudaCheckErrors("final_reduction kernel launch error");
+  // Do final reduction on cpu
+  MinResultSingleIndex h_results[num_blocks];
+  CUDA_CHECK(cudaMemcpy(&h_results, d_results,
+                        sizeof(MinResultSingleIndex) * num_blocks,
+                        cudaMemcpyDeviceToHost));
 
-  MinResultSingleIndex h_min_result;
-  cudaMemcpy(&h_min_result, d_results, sizeof(MinResultSingleIndex),
-             cudaMemcpyDeviceToHost);
-  cudaCheckErrors("h_min_result cudaMemcpy error");
+  MinResultSingleIndex min_result{INT_MAX, -1};
+  for (int i = 0; i < num_blocks; ++i) {
+    MinResultSingleIndex result = h_results[i];
+    if (result.distance < min_result.distance)
+      min_result = result;
+  }
 
-  cudaFree(d_results);
-  cudaCheckErrors("d_block_results cudaFree error");
-  cudaFree(d_points_a);
-  cudaCheckErrors("d_points_a cudaFree error");
-  cudaFree(d_points_b);
-  cudaCheckErrors("d_points_b cudaFree error");
+  int a_idx = min_result.idx % num_as;
+  int b_idx = min_result.idx / num_as;
+  int2 h_a, h_b;
+  CUDA_CHECK(cudaMemcpy(&h_a, d_points_a + a_idx, sizeof(int2),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&h_b, d_points_b + b_idx, sizeof(int2),
+                        cudaMemcpyDeviceToHost));
+
+  CUDA_CHECK(cudaFree(d_results));
+  CUDA_CHECK(cudaFree(d_points_a));
+  CUDA_CHECK(cudaFree(d_points_b));
 
   Pair result;
-  result.distance = h_min_result.distance;
-  int a_idx = h_min_result.idx % num_as;
-  int b_idx = h_min_result.idx / num_as;
-  result.ax = a_idx % img_width;
-  result.ay = a_idx / img_width;
-  result.bx = b_idx % img_width;
-  result.by = b_idx / img_width;
+  result.distance = sqrt(min_result.distance);
+  result.ax = h_a.x;
+  result.ay = h_a.y;
+  result.bx = h_b.x;
+  result.by = h_b.y;
   return result;
 }
 
-Pair get_min_pair(int *h_image, int img_height, int img_width) {
+Pair launch_min_pair_thread_per_pair_v2(const int num_as, const int num_bs,
+                                        const int img_width, int *d_as,
+                                        int *d_bs) {
+
+  uint block_dim = 16;
+  dim3 block_size{block_dim, block_dim};
+  int num_blocks = num_blocks_max_occupancy(
+      min_distances_thread_per_pair, block_dim * block_dim,
+      sizeof(MinResult) * WARP_SIZE + sizeof(int2) * block_dim * 2, 1.42f);
+  uint grid_dim = (uint)sqrt(num_blocks);
+  dim3 grid_size{grid_dim, grid_dim};
+  num_blocks = (int)grid_dim * (int)grid_dim;
+
+  MinResult *d_results;
+  CUDA_CHECK(cudaMalloc(&d_results, sizeof(MinResult) * num_blocks));
+
+  int2 *d_points_a, *d_points_b;
+  CUDA_CHECK(cudaMalloc(&d_points_a, sizeof(int2) * num_as));
+  CUDA_CHECK(cudaMalloc(&d_points_b, sizeof(int2) * num_bs));
+  make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b);
+
+  min_distances_thread_per_pair_v2<<<grid_size, block_size>>>(
+      d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
+  CUDA_CHECK(cudaGetLastError());
+
+  // Do final reduction on cpu
+  MinResult h_results[num_blocks];
+  CUDA_CHECK(cudaMemcpy(&h_results, d_results, sizeof(MinResult) * num_blocks,
+                        cudaMemcpyDeviceToHost));
+
+  MinResult min_result{INT_MAX, -1, -1};
+  for (int i = 0; i < num_blocks; ++i) {
+    MinResult result = h_results[i];
+    if (result.distance < min_result.distance)
+      min_result = result;
+  }
+
+  int2 h_a, h_b;
+  CUDA_CHECK(cudaMemcpy(&h_a, d_points_a + min_result.a_idx, sizeof(int2),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&h_b, d_points_b + min_result.b_idx, sizeof(int2),
+                        cudaMemcpyDeviceToHost));
+
+  CUDA_CHECK(cudaFree(d_results));
+  CUDA_CHECK(cudaFree(d_points_a));
+  CUDA_CHECK(cudaFree(d_points_b));
+
+  Pair result;
+  result.distance = sqrt(min_result.distance);
+  result.ax = h_a.x;
+  result.ay = h_a.y;
+  result.bx = h_b.x;
+  result.by = h_b.y;
+  return result;
+}
+
+Pair get_min_pair(const int *const h_image, const int img_height,
+                  const int img_width) {
   int total_pixels = img_height * img_width;
-  int *d_ones, *d_twos;
-  cudaMalloc(&d_ones, total_pixels * sizeof(int));
-  cudaCheckErrors("cudaMalloc d_ones error");
-  cudaMalloc(&d_twos, total_pixels * sizeof(int));
-  cudaCheckErrors("cudaMalloc d_twos error");
+  int *d_as, *d_bs;
+  CUDA_CHECK(cudaMalloc(&d_as, total_pixels * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_bs, total_pixels * sizeof(int)));
   auto segment_sizes =
-      launch_index_shapes(h_image, img_height, img_width, d_ones, d_twos);
+      launch_index_shapes(h_image, img_height, img_width, d_as, d_bs);
   auto [num_as, num_bs] = segment_sizes;
 
+  if (num_as < 1 || num_bs < 1)
+    throw std::runtime_error("Must have at least 1 a and 1 b");
+
   Pair h_min_pair;
-  long long num_pairs = num_as * num_bs;
+  long long num_pairs = (long long)num_as * (long long)num_bs;
   int max_segment_size = std::max(num_as, num_bs);
-  if (num_pairs > (long long)INT_MAX || max_segment_size > 10000) {
+  if (num_pairs > (long long)INT_MAX || max_segment_size > 5000) {
     h_min_pair =
-        launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_ones, d_twos);
+        launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs);
   } else {
-    h_min_pair = launch_min_pair_thread_per_pair(num_as, num_bs, img_width,
-                                                 d_ones, d_twos);
+    h_min_pair =
+        launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs);
   }
-  cudaFree(d_ones);
-  cudaCheckErrors("cudaFree d_ones error");
-  cudaFree(d_twos);
-  cudaCheckErrors("cudaFree d_twos error");
+  CUDA_CHECK(cudaFree(d_as));
+  CUDA_CHECK(cudaFree(d_bs));
 
   return h_min_pair;
 }

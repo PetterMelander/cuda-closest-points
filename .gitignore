@@ -9,3 +9,5 @@ ncu
 .vscode
 bin
 obj
+old
+build

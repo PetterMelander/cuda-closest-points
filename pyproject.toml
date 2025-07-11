@@ -1,0 +1,19 @@
+[build-system]
+requires = [
+    "scikit-build-core",
+    "pybind11>=2.10"
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "closest-points-cuda"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3.1",
+]
+
+[tool.scikit-build]
+cmake.version = ">=3.18"
