@@ -87,65 +87,12 @@ Pair launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
 Pair launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
                                      const int img_width, int *d_as,
                                      int *d_bs) {
-  int num_blocks =
-      num_blocks_max_occupancy(min_distances_thread_per_pair, THREADS_PER_BLOCK,
-                               sizeof(MinResultSingleIndex) * WARP_SIZE, 2.0f);
-
-  MinResultSingleIndex *d_results;
-  CUDA_CHECK(cudaMalloc(&d_results, sizeof(MinResultSingleIndex) * num_blocks));
-
-  int2 *d_points_a, *d_points_b;
-  CUDA_CHECK(cudaMalloc(&d_points_a, sizeof(int2) * num_as));
-  CUDA_CHECK(cudaMalloc(&d_points_b, sizeof(int2) * num_bs));
-  make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b);
-
-  min_distances_thread_per_pair<<<num_blocks, THREADS_PER_BLOCK>>>(
-      d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
-  CUDA_CHECK(cudaGetLastError());
-
-  // Do final reduction on cpu
-  MinResultSingleIndex h_results[num_blocks];
-  CUDA_CHECK(cudaMemcpy(&h_results, d_results,
-                        sizeof(MinResultSingleIndex) * num_blocks,
-                        cudaMemcpyDeviceToHost));
-
-  MinResultSingleIndex min_result{INT_MAX, -1};
-  for (int i = 0; i < num_blocks; ++i) {
-    MinResultSingleIndex result = h_results[i];
-    if (result.distance < min_result.distance)
-      min_result = result;
-  }
-
-  int a_idx = min_result.idx % num_as;
-  int b_idx = min_result.idx / num_as;
-  int2 h_a, h_b;
-  CUDA_CHECK(cudaMemcpy(&h_a, d_points_a + a_idx, sizeof(int2),
-                        cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemcpy(&h_b, d_points_b + b_idx, sizeof(int2),
-                        cudaMemcpyDeviceToHost));
-
-  CUDA_CHECK(cudaFree(d_results));
-  CUDA_CHECK(cudaFree(d_points_a));
-  CUDA_CHECK(cudaFree(d_points_b));
-
-  Pair result;
-  result.distance = sqrt(min_result.distance);
-  result.ax = h_a.x;
-  result.ay = h_a.y;
-  result.bx = h_b.x;
-  result.by = h_b.y;
-  return result;
-}
-
-Pair launch_min_pair_thread_per_pair_v2(const int num_as, const int num_bs,
-                                        const int img_width, int *d_as,
-                                        int *d_bs) {
 
   uint block_dim = 16;
   dim3 block_size{block_dim, block_dim};
   int num_blocks = num_blocks_max_occupancy(
       min_distances_thread_per_pair, block_dim * block_dim,
-      sizeof(MinResult) * WARP_SIZE + sizeof(int2) * block_dim * 2, 1.42f);
+      sizeof(MinResult) * WARP_SIZE, 1.42f);
   uint grid_dim = (uint)sqrt(num_blocks);
   dim3 grid_size{grid_dim, grid_dim};
   num_blocks = (int)grid_dim * (int)grid_dim;
@@ -158,7 +105,7 @@ Pair launch_min_pair_thread_per_pair_v2(const int num_as, const int num_bs,
   CUDA_CHECK(cudaMalloc(&d_points_b, sizeof(int2) * num_bs));
   make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b);
 
-  min_distances_thread_per_pair_v2<<<grid_size, block_size>>>(
+  min_distances_thread_per_pair<<<grid_size, block_size>>>(
       d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
   CUDA_CHECK(cudaGetLastError());
 
