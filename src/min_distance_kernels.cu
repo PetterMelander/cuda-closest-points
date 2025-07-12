@@ -172,7 +172,9 @@ __global__ void min_distances_thread_per_pair(int2 *points_a, int2 *points_b,
        i += gridDim.x) {
     int x_idx = i * blockDim.x + threadIdx.x;
 
-    int2 my_a = points_a[x_idx];
+    int2 my_a;
+    if (x_idx < num_as)
+      my_a = points_a[x_idx];
 
     for (int j = blockIdx.y; j < (num_bs + blockDim.y - 1) / blockDim.y;
          j += gridDim.y) {

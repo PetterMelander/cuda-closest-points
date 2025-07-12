@@ -14,8 +14,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
-# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G")
 
 # Specify CUDA architecture (e.g., Hopper)
 # This will generate code for sm_89
@@ -57,7 +57,7 @@ set(TEST_SOURCES
     src/min_distance_kernels.cu
 )
 
-add_executable(run_test src/main.cu ${TEST_SOURCES})
+add_executable(run_test src/test.cpp ${TEST_SOURCES})
 
 target_include_directories(run_test PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -70,5 +70,5 @@ target_link_libraries(run_test PRIVATE
 
 target_compile_options(run_test PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall>
-    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -lineinfo --compiler-options -Wall>
+    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -lineinfo --compiler-options -Wall -g -G>
 )

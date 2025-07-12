@@ -1,10 +1,7 @@
 #include "../include/host_code.cuh"
 #include "../include/kernels.cuh"
 #include <algorithm>
-#include <climits>
 #include <cmath>
-#include <stdexcept>
-#include <tuple>
 
 std::tuple<int, int> launch_index_shapes(const int *const h_image,
                                          const int img_height,
@@ -74,9 +71,11 @@ Pair launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
 
   if (swapped) {
     std::swap(min_result.a_idx, min_result.b_idx);
+    std::swap(num_as, num_bs);
+    std::swap(d_as, d_bs);
   }
   Pair result;
-  result.distance = std::sqrt(min_result.distance);
+  result.distance = sqrt(min_result.distance);
   result.ax = min_result.a_idx % img_width;
   result.ay = min_result.a_idx / img_width;
   result.bx = min_result.b_idx % img_width;
@@ -156,13 +155,13 @@ Pair get_min_pair(const int *const h_image, const int img_height,
   Pair h_min_pair;
   long long num_pairs = (long long)num_as * (long long)num_bs;
   int max_segment_size = std::max(num_as, num_bs);
-  if (num_pairs > (long long)INT_MAX || max_segment_size > 5000) {
-    h_min_pair =
-        launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs);
-  } else {
-    h_min_pair =
-        launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs);
-  }
+  // if (num_pairs > (long long)INT_MAX || max_segment_size > 5000) {
+  h_min_pair =
+      launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs);
+  // } else {
+  h_min_pair =
+      launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs);
+  // }
   CUDA_CHECK(cudaFree(d_as));
   CUDA_CHECK(cudaFree(d_bs));
 

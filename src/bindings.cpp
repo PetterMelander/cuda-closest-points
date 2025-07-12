@@ -1,7 +1,7 @@
 #include "../include/host_code.cuh"
 #include "pybind11/pybind11.h"
 #include <pybind11/numpy.h>
-#include <vector> // Required for std::vector
+#include <utility>
 
 namespace py = pybind11;
 
@@ -15,6 +15,10 @@ Pair closest_points(const py::array_t<int> &image) {
   const int width = buf.shape[1];
   const int *const ptr = static_cast<const int *const>(buf.ptr);
   Pair min_pair = get_min_pair(ptr, height, width);
+
+  // Swap coordinates from cuda (x,y) ordering to numpy (row, col)
+  std::swap(min_pair.ax, min_pair.ay);
+  std::swap(min_pair.bx, min_pair.by);
   return min_pair;
 }
 

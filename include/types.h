@@ -7,11 +7,6 @@ struct MinResult {
   int b_idx;
 };
 
-struct MinResultSingleIndex {
-  int distance;
-  int idx;
-};
-
 struct Pair {
   int distance;
   int ax;

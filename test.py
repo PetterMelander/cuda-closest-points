@@ -12,9 +12,10 @@ for i in range(img_size):
             image[i, j] = 1
         elif rand_val < 0.2:
             image[i, j] = 2
+# image[0,0] = 1
+# image[256, 512] = 2
 
 result_pair = closest_points_cuda.closest_points(image)
-p = closest_points_cuda.Pair()
 
 print("\n--- Results ---")
 print(f"Calculated distance: {result_pair.distance}")
