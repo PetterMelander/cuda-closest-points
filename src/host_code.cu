@@ -2,6 +2,21 @@
 #include "../include/kernels.cuh"
 #include <algorithm>
 #include <cmath>
+#include <vector>
+
+MinResult cpu_reduction(size_t dsize, MinResult *d_results) {
+  std::vector<MinResult> h_results{dsize};
+  CUDA_CHECK(cudaMemcpy(h_results.data(), d_results, sizeof(MinResult) * dsize,
+                        cudaMemcpyDeviceToHost));
+
+  MinResult min_result{INT_MAX, -1, -1};
+  for (int i = 0; i < dsize; ++i) {
+    MinResult result = h_results[i];
+    if (result.distance < min_result.distance)
+      min_result = result;
+  }
+  return min_result;
+}
 
 std::tuple<int, int> launch_index_shapes(const int *const h_image,
                                          const int img_height,
@@ -54,19 +69,7 @@ Pair launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
       d_as, d_bs, num_as, num_bs, img_width, d_results);
   CUDA_CHECK(cudaGetLastError());
 
-  // Do final reduction on cpu
-  MinResult h_min_results[num_blocks];
-  CUDA_CHECK(cudaMemcpy(&h_min_results, d_results,
-                        sizeof(MinResult) * num_blocks,
-                        cudaMemcpyDeviceToHost));
-
-  MinResult min_result{INT_MAX, -1, -1};
-  for (int i = 0; i < num_blocks; ++i) {
-    MinResult result = h_min_results[i];
-    if (result.distance < min_result.distance)
-      min_result = result;
-  }
-
+  MinResult min_result = cpu_reduction(num_blocks, d_results);
   CUDA_CHECK(cudaFree(d_results));
 
   if (swapped) {
@@ -108,17 +111,8 @@ Pair launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
       d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
   CUDA_CHECK(cudaGetLastError());
 
-  // Do final reduction on cpu
-  MinResult h_results[num_blocks];
-  CUDA_CHECK(cudaMemcpy(&h_results, d_results, sizeof(MinResult) * num_blocks,
-                        cudaMemcpyDeviceToHost));
-
-  MinResult min_result{INT_MAX, -1, -1};
-  for (int i = 0; i < num_blocks; ++i) {
-    MinResult result = h_results[i];
-    if (result.distance < min_result.distance)
-      min_result = result;
-  }
+  MinResult min_result = cpu_reduction(num_blocks, d_results);
+  CUDA_CHECK(cudaFree(d_results));
 
   int2 h_a, h_b;
   CUDA_CHECK(cudaMemcpy(&h_a, d_points_a + min_result.a_idx, sizeof(int2),
@@ -126,7 +120,6 @@ Pair launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
   CUDA_CHECK(cudaMemcpy(&h_b, d_points_b + min_result.b_idx, sizeof(int2),
                         cudaMemcpyDeviceToHost));
 
-  CUDA_CHECK(cudaFree(d_results));
   CUDA_CHECK(cudaFree(d_points_a));
   CUDA_CHECK(cudaFree(d_points_b));
 
@@ -155,13 +148,13 @@ Pair get_min_pair(const int *const h_image, const int img_height,
   Pair h_min_pair;
   long long num_pairs = (long long)num_as * (long long)num_bs;
   int max_segment_size = std::max(num_as, num_bs);
-  // if (num_pairs > (long long)INT_MAX || max_segment_size > 5000) {
+  if (num_pairs > (long long)INT_MAX || max_segment_size > 5000) {
   h_min_pair =
       launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs);
-  // } else {
+  } else {
   h_min_pair =
       launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs);
-  // }
+  }
   CUDA_CHECK(cudaFree(d_as));
   CUDA_CHECK(cudaFree(d_bs));
 
