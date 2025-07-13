@@ -90,7 +90,8 @@ __global__ void final_reduction(MinResult *input, int num_elements,
 
 __global__ void min_distances_thread_per_a(int *as, int *bs, int num_as,
                                            int num_bs, int img_width,
-                                           MinResult *block_results) {
+                                           MinResult *block_results,
+                                           bool order_swapped) {
   int tid = threadIdx.x + blockDim.x * blockIdx.x;
   __shared__ union {
     int bs[THREADS_PER_BLOCK];
@@ -140,8 +141,13 @@ __global__ void min_distances_thread_per_a(int *as, int *bs, int num_as,
 
   MinResult min_result;
   min_result.distance = min_distance;
-  min_result.a_idx = my_a_linear_coord;
-  min_result.b_idx = min_b_linear_coord;
+  if (order_swapped) {
+    min_result.a_idx = min_b_linear_coord;
+    min_result.b_idx = my_a_linear_coord;
+  } else {
+    min_result.a_idx = my_a_linear_coord;
+    min_result.b_idx = min_b_linear_coord;
+  }
   warp_shuffle_reduction(min_result, smem.min_results, block_results);
 }
 
@@ -150,13 +156,15 @@ __host__ __device__ int2 idx_to_point(int idx, int img_width) {
 }
 
 __host__ void make_points(int *as, int *bs, int num_as, int num_bs,
-                          int img_width, int2 *points_a, int2 *points_b) {
+                          int img_width, int2 *points_a, int2 *points_b,
+                          cudaStream_t stream) {
   auto op = [img_width] __device__(int idx) {
     return idx_to_point(idx, img_width);
   };
-  // TODO: launch transforms in streams to parallelize
-  thrust::transform(thrust::device, as, as + num_as, points_a, op);
-  thrust::transform(thrust::device, bs, bs + num_bs, points_b, op);
+  auto policy = thrust::cuda::par_nosync.on(stream);
+
+  thrust::transform(policy, as, as + num_as, points_a, op);
+  thrust::transform(policy, bs, bs + num_bs, points_b, op);
 }
 
 __global__ void min_distances_thread_per_pair(int2 *points_a, int2 *points_b,
@@ -195,4 +203,18 @@ __global__ void min_distances_thread_per_pair(int2 *points_a, int2 *points_b,
   __shared__ MinResult results[WARP_SIZE];
   MinResult min_result{min_distance, min_x_idx, min_y_idx};
   warp_shuffle_reduction_2d(min_result, results, block_results);
+
+  // Convert the min result to same format as other distance kernel so that
+  // a_idx and b_idx are the linear indices in the image
+  int block_size = blockDim.x * blockDim.y;
+  int tid = threadIdx.x + blockDim.x * threadIdx.y + block_size * blockIdx.x +
+            block_size * gridDim.x * blockIdx.y;
+  if (tid < gridDim.x) {
+    min_result = block_results[tid];
+    int2 a = points_a[min_result.a_idx];
+    int2 b = points_b[min_result.b_idx];
+    min_result.a_idx = a.x * img_width + a.y;
+    min_result.b_idx = b.x * img_width + b.y;
+    block_results[tid] = min_result;
+  }
 }

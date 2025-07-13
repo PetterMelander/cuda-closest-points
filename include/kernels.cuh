@@ -1,7 +1,7 @@
 #ifndef KERNELS_H
 #define KERNELS_H
 
-#include "../include/types.h"
+#include "types.h"
 #include <climits>
 #include <cooperative_groups.h>
 
@@ -14,10 +14,10 @@ __global__ void find_nonzeros(int *img_array, int dsize, int *g_nonzero_idxs,
 
 __global__ void min_distances_thread_per_a(int *as, int *bs, int num_as,
                                            int num_bs, int img_width,
-                                           MinResult *block_results);
+                                           MinResult *block_results, bool swapped);
 
 __host__ void make_points(int *as, int *bs, int num_as, int num_bs,
-                          int img_width, int2 *points_a, int2 *points_b);
+                          int img_width, int2 *points_a, int2 *points_b, cudaStream_t stream);
 
 __global__ void min_distances_thread_per_pair(int2 *points_a, int2 *points_b,
                                               int num_as, int num_bs,

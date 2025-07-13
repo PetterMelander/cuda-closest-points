@@ -6,7 +6,8 @@
 
 namespace py = pybind11;
 
-std::vector<std::vector<Pair>> closest_points(const py::array_t<int> &image) {
+std::vector<std::vector<Pair>>
+closest_points(const py::array_t<const int> &image) {
   auto buf = image.request();
   if (buf.ndim != 2) {
     throw std::runtime_error("Image must be 2-dimensional");

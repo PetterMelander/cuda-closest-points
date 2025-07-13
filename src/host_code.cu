@@ -9,7 +9,7 @@
 
 using std::vector;
 
-MinResult cpu_reduction(vector<MinResult> results) {
+MinResult cpu_reduction(PinnedVector<MinResult> results) {
   MinResult min_result{INT_MAX, -1, -1};
   for (MinResult &result : results) {
     if (result.distance < min_result.distance)
@@ -55,8 +55,8 @@ void sort_nonzeros(int *&d_nonzero_idxs, int *&d_nonzero_values,
   bool output_in_buffer =
       (reinterpret_cast<int *>(d_keys.Current()) == d_values_buffer);
   if (output_in_buffer) {
-    std::swap(d_idxs_buffer, d_nonzero_idxs);
-    std::swap(d_values_buffer, d_nonzero_values);
+    std::swap(d_nonzero_idxs, d_idxs_buffer);
+    std::swap(d_nonzero_values, d_values_buffer);
   }
   CUDA_CHECK(cudaFree(d_idxs_buffer));
   CUDA_CHECK(cudaFree(d_values_buffer));
@@ -106,9 +106,10 @@ encode_runs(int *d_sorted_nonzero_values, int num_nonzeros) {
   return std::make_tuple(h_unique_values, h_mask_sizes, h_num_unique_values);
 }
 
-std::tuple<vector<int>, vector<int>, int>
-index_masks(const int *const h_image, int total_pixels, int *&d_nonzero_idxs,
-               int *&d_nonzero_values) {
+std::tuple<vector<int>, vector<int>, int> index_masks(const int *const h_image,
+                                                      int total_pixels,
+                                                      int *&d_nonzero_idxs,
+                                                      int *&d_nonzero_values) {
 
   int *d_image;
   CUDA_CHECK(cudaMalloc(&d_image, sizeof(int) * total_pixels));
@@ -118,6 +119,7 @@ index_masks(const int *const h_image, int total_pixels, int *&d_nonzero_idxs,
   // Index shapes
   int *d_num_nonzeros;
   CUDA_CHECK(cudaMalloc(&d_num_nonzeros, sizeof(int)));
+  CUDA_CHECK(cudaMemset(d_num_nonzeros, 0, sizeof(int)));
 
   int num_blocks =
       num_blocks_max_occupancy(find_nonzeros, THREADS_PER_BLOCK,
@@ -139,9 +141,10 @@ index_masks(const int *const h_image, int total_pixels, int *&d_nonzero_idxs,
   return encode_runs(d_nonzero_values, h_num_nonzeros);
 }
 
-vector<MinResult> launch_min_pair_thread_per_a(int num_as, int num_bs,
-                                               const int img_width, int *d_as,
-                                               int *d_bs) {
+void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
+                                  int *d_as, int *d_bs,
+                                  PinnedVector<MinResult> &h_results,
+                                  cudaStream_t stream) {
 
   // Kernel parallelizes over a's. Launch kernel with the larger mask as a.
   bool swapped = num_as < num_bs;
@@ -151,34 +154,26 @@ vector<MinResult> launch_min_pair_thread_per_a(int num_as, int num_bs,
   }
 
   int num_blocks = (num_as + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+  h_results.resize(num_blocks);
 
   MinResult *d_results;
-  CUDA_CHECK(cudaMalloc(&d_results, sizeof(MinResult) * num_blocks));
+  CUDA_CHECK(
+      cudaMallocAsync(&d_results, sizeof(MinResult) * num_blocks, stream));
 
-  min_distances_thread_per_a<<<num_blocks, THREADS_PER_BLOCK>>>(
-      d_as, d_bs, num_as, num_bs, img_width, d_results);
+  min_distances_thread_per_a<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
+      d_as, d_bs, num_as, num_bs, img_width, d_results, swapped);
   CUDA_CHECK(cudaGetLastError());
 
-  // Copy results to vector on host
-  vector<MinResult> h_results(num_blocks);
-  CUDA_CHECK(cudaMemcpy(h_results.data(), d_results,
-                        sizeof(MinResult) * num_blocks,
-                        cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaFree(d_results));
-
-  // Swap back
-  if (swapped) {
-    for (MinResult &result : h_results) {
-      std::swap(result.a_idx, result.b_idx);
-    }
-  }
-  return h_results;
+  CUDA_CHECK(cudaMemcpyAsync(h_results.data(), d_results,
+                             sizeof(MinResult) * num_blocks,
+                             cudaMemcpyDeviceToHost, stream));
+  CUDA_CHECK(cudaFreeAsync(d_results, stream));
 }
 
-vector<MinResult> launch_min_pair_thread_per_pair(const int num_as,
-                                                  const int num_bs,
-                                                  const int img_width,
-                                                  int *d_as, int *d_bs) {
+void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
+                                     const int img_width, int *d_as, int *d_bs,
+                                     PinnedVector<MinResult> &h_results,
+                                     cudaStream_t stream) {
 
   uint block_dim = 16;
   dim3 block_size{block_dim, block_dim};
@@ -188,67 +183,58 @@ vector<MinResult> launch_min_pair_thread_per_pair(const int num_as,
   uint grid_dim = (uint)sqrt(num_blocks);
   dim3 grid_size{grid_dim, grid_dim};
   num_blocks = (int)grid_dim * (int)grid_dim;
+  h_results.resize(num_blocks);
 
   MinResult *d_results;
-  CUDA_CHECK(cudaMalloc(&d_results, sizeof(MinResult) * num_blocks));
+  CUDA_CHECK(
+      cudaMallocAsync(&d_results, sizeof(MinResult) * num_blocks, stream));
 
   int2 *d_points_a, *d_points_b;
-  CUDA_CHECK(cudaMalloc(&d_points_a, sizeof(int2) * num_as));
-  CUDA_CHECK(cudaMalloc(&d_points_b, sizeof(int2) * num_bs));
-  make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b);
+  CUDA_CHECK(cudaMallocAsync(&d_points_a, sizeof(int2) * num_as, stream));
+  CUDA_CHECK(cudaMallocAsync(&d_points_b, sizeof(int2) * num_bs, stream));
+  make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b,
+              stream);
 
-  min_distances_thread_per_pair<<<grid_size, block_size>>>(
+  min_distances_thread_per_pair<<<grid_size, block_size, 0, stream>>>(
       d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
   CUDA_CHECK(cudaGetLastError());
 
-  // Copy results to vector on host
-  vector<MinResult> h_results(num_blocks);
-  CUDA_CHECK(cudaMemcpy(h_results.data(), d_results,
-                        sizeof(MinResult) * num_blocks,
-                        cudaMemcpyDeviceToHost));
-
-  // Unlike the other min_distance kernel whis one returns MinResults with
-  // indices indicating at which indices in d_points the coordinates are
-  // located. Before returning, get the actual linear indices.
-  vector<int2> h_points_a(num_as);
-  CUDA_CHECK(cudaMemcpy(h_points_a.data(), d_points_a, sizeof(int2) * num_as,
-                        cudaMemcpyDeviceToHost));
-  vector<int2> h_points_b(num_bs);
-  CUDA_CHECK(cudaMemcpy(h_points_b.data(), d_points_b, sizeof(int2) * num_bs,
-                        cudaMemcpyDeviceToHost));
-
-  for (MinResult &result : h_results) {
-    int2 a = h_points_a[result.a_idx];
-    int2 b = h_points_b[result.b_idx];
-    result.a_idx = a.x * img_width + a.y;
-    result.b_idx = b.x * img_width + b.y;
-  }
-
-  CUDA_CHECK(cudaFree(d_points_a));
-  CUDA_CHECK(cudaFree(d_points_b));
-  CUDA_CHECK(cudaFree(d_results));
-
-  return h_results;
+  CUDA_CHECK(cudaMemcpyAsync(h_results.data(), d_results,
+                             sizeof(MinResult) * num_blocks,
+                             cudaMemcpyDeviceToHost, stream));
+  CUDA_CHECK(cudaFreeAsync(d_points_a, stream));
+  CUDA_CHECK(cudaFreeAsync(d_points_b, stream));
+  CUDA_CHECK(cudaFreeAsync(d_results, stream));
 }
 
-vector<MinResult> get_min_pairs(int *d_as, int *d_bs, int num_as, int num_bs,
-                                int img_width) {
+void get_min_pairs(int *d_as, int *d_bs, int num_as, int num_bs, int img_width,
+                   PinnedVector<MinResult> &h_results, cudaStream_t stream) {
   long long num_pairs = (long long)num_as * (long long)num_bs;
   int max_mask_size = std::max(num_as, num_bs);
   if (num_pairs > (long long)INT_MAX || max_mask_size > 5000) {
-    return launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs);
+    launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs,
+                                 h_results, stream);
   } else {
-    return launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as,
-                                           d_bs);
+    launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
+                                    h_results, stream);
   }
 }
 
-vector<vector<vector<MinResult>>>
+vector<vector<PinnedVector<MinResult>>>
 initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
                         int num_unique_values, int *d_sorted_idxs,
                         int img_width) {
-  vector<vector<vector<MinResult>>> h_unreduced_pixel_pairs(
-      num_unique_values, vector<vector<MinResult>>(num_unique_values));
+
+  int num_mask_combinations = (num_unique_values * (num_unique_values - 1)) / 2;
+  vector<cudaStream_t> streams(num_mask_combinations);
+  for (auto &stream : streams) {
+    CUDA_CHECK(cudaStreamCreate(&stream));
+  }
+
+  vector<vector<PinnedVector<MinResult>>> h_unreduced_result_vectors(
+      num_unique_values, vector<PinnedVector<MinResult>>(num_unique_values));
+
+  int stream_number = 0;
   int a_offset = 0;
   for (int i = 0; i < num_unique_values; ++i) {
     int a = unique_values[i];
@@ -261,16 +247,21 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int b = unique_values[j];
       int *b_ptr = d_sorted_idxs + b_offset;
 
-      vector<MinResult> h_result_vector =
-          get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width);
+      get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width,
+                    h_unreduced_result_vectors[i][j], streams[stream_number]);
 
-      h_unreduced_pixel_pairs[i][j] = h_result_vector;
-      h_unreduced_pixel_pairs[j][i] = h_result_vector;
       b_offset += num_bs;
+      ++stream_number;
     }
     a_offset += num_as;
   }
-  return h_unreduced_pixel_pairs;
+
+  for (auto &stream : streams) {
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaStreamDestroy(stream));
+  }
+
+  return h_unreduced_result_vectors;
 }
 
 vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
@@ -288,7 +279,7 @@ vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
   CUDA_CHECK(cudaFree(d_sorted_values));
 
   // Calculate (not completely reduced) pixel pairings between all masks
-  vector<vector<vector<MinResult>>> h_unreduced_pixel_pairs =
+  vector<vector<PinnedVector<MinResult>>> h_unreduced_pixel_pairs =
       initial_pair_reductions(unique_values, mask_sizes, num_unique_values,
                               d_sorted_idxs, img_width);
   CUDA_CHECK(cudaFree(d_sorted_idxs));
