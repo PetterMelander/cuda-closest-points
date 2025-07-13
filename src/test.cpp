@@ -16,10 +16,14 @@ int main() {
   // Assign 10% to 1, 10% to 2, rest to 0
   for (int i = 0; i < total_pixels; ++i) {
     double r = dis(gen);
-    if (r < 0.25)
+    if (r < 0.001)
       image[i] = dis2(gen);
     else
       image[i] = 0;
+  }
+
+  for (int i = 0; i < 10; ++i) {
+    get_pairs(image, img_size, img_size);
   }
 
   std::vector<std::vector<Pair>> pairs = get_pairs(image, img_size, img_size);

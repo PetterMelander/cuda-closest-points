@@ -174,8 +174,8 @@ __global__ void min_distances_thread_per_pair(int2 *points_a, int2 *points_b,
 
   // Grid stride 2d
   int min_distance = INT_MAX;
-  int min_x_idx = -1;
-  int min_y_idx = -1;
+  int min_a_idx = -1;
+  int min_b_idx = -1;
   for (int x_idx = threadIdx.x + blockIdx.x * blockDim.x; x_idx < num_as;
        x_idx += gridDim.x * blockDim.x) {
 
@@ -193,28 +193,14 @@ __global__ void min_distances_thread_per_pair(int2 *points_a, int2 *points_b,
         int distance = dx * dx + dy * dy;
         if (distance < min_distance) {
           min_distance = distance;
-          min_x_idx = x_idx;
-          min_y_idx = y_idx;
+          min_a_idx = my_a.y * img_width + my_a.x;
+          min_b_idx = my_b.y * img_width + my_b.x;
         }
       }
     }
   }
 
   __shared__ MinResult results[WARP_SIZE];
-  MinResult min_result{min_distance, min_x_idx, min_y_idx};
+  MinResult min_result{min_distance, min_a_idx, min_b_idx};
   warp_shuffle_reduction_2d(min_result, results, block_results);
-
-  // Convert the min result to same format as other distance kernel so that
-  // a_idx and b_idx are the linear indices in the image
-  int block_size = blockDim.x * blockDim.y;
-  int tid = threadIdx.x + blockDim.x * threadIdx.y + block_size * blockIdx.x +
-            block_size * gridDim.x * blockIdx.y;
-  if (tid < gridDim.x) {
-    min_result = block_results[tid];
-    int2 a = points_a[min_result.a_idx];
-    int2 b = points_b[min_result.b_idx];
-    min_result.a_idx = a.x * img_width + a.y;
-    min_result.b_idx = b.x * img_width + b.y;
-    block_results[tid] = min_result;
-  }
 }
