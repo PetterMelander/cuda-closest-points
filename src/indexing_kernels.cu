@@ -1,8 +1,10 @@
 #include "../include/kernels.cuh"
 
-__device__ void flush_buffer(int *s_buffer, int &s_count, int *g_buffer,
-                             int *g_count) {
-  int items_to_flush = (s_count < TILE_SIZE) ? s_count : TILE_SIZE;
+__device__ void flush_buffer(int *s_buffer_idxs, int *s_buffer_values,
+                                int &s_count, int *g_buffer_idxs,
+                                int *g_buffer_values, int *g_count) {
+  int items_to_flush =
+      (s_count < TILE_SIZE_INDEXING) ? s_count : TILE_SIZE_INDEXING;
 
   __shared__ int global_base_idx;
   if (threadIdx.x == 0) {
@@ -11,13 +13,14 @@ __device__ void flush_buffer(int *s_buffer, int &s_count, int *g_buffer,
   __syncthreads();
 
   for (int i = threadIdx.x; i < items_to_flush; i += blockDim.x) {
-    g_buffer[global_base_idx + i] = s_buffer[i];
+    g_buffer_idxs[global_base_idx + i] = s_buffer_idxs[i];
+    g_buffer_values[global_base_idx + i] = s_buffer_values[i];
   }
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    if (s_count > TILE_SIZE) {
-      s_count = s_count - TILE_SIZE;
+    if (s_count > TILE_SIZE_INDEXING) {
+      s_count = s_count - TILE_SIZE_INDEXING;
     } else {
       s_count = 0;
     }
@@ -25,8 +28,9 @@ __device__ void flush_buffer(int *s_buffer, int &s_count, int *g_buffer,
   __syncthreads();
 }
 
-__device__ void flush_buffer_final(int *s_buffer, int s_count, int *g_buffer,
-                                   int *g_count) {
+__device__ void flush_buffer_final(int *s_buffer_idxs, int *s_buffer_values,
+                                      int s_count, int *g_buffer_idxs,
+                                      int *g_buffer_values, int *g_count) {
   if (s_count <= 0) {
     return;
   }
@@ -38,64 +42,54 @@ __device__ void flush_buffer_final(int *s_buffer, int s_count, int *g_buffer,
   __syncthreads();
 
   for (int i = threadIdx.x; i < s_count; i += blockDim.x) {
-    g_buffer[global_base_idx + i] = s_buffer[i];
+    g_buffer_idxs[global_base_idx + i] = s_buffer_idxs[i];
+    g_buffer_values[global_base_idx + i] = s_buffer_values[i];
   }
 }
 
-__global__ void index_shapes(int *img_array, int dsize, int *as,
-                             int *num_as, int *bs, int *num_bs) {
-  __shared__ int s_as[TILE_SIZE];
-  __shared__ int s_bs[TILE_SIZE];
-  __shared__ int s_num_as;
-  __shared__ int s_num_bs;
+__global__ void find_nonzeros(int *img_array, int dsize, int *g_nonzero_idxs,
+                                int *g_nonzero_values, int *g_num_nonzeros) {
+  __shared__ int s_nonzero_idxs[TILE_SIZE_INDEXING];
+  __shared__ int s_nonzero_values[TILE_SIZE_INDEXING];
+  __shared__ int s_num_nonzeros;
 
   if (threadIdx.x == 0) {
-    s_num_as = 0;
-    s_num_bs = 0;
+    s_num_nonzeros = 0;
   }
   __syncthreads();
 
   int block_base_idx = blockIdx.x * blockDim.x;
-
+  // int buffer_size = 0;
+  // int buffer[8];
   while (block_base_idx < dsize) {
     int my_idx = block_base_idx + threadIdx.x;
-    int my_value = -1;
     int write_idx_as = -1;
-    int write_idx_bs = -1;
 
+    int my_value;
     if (my_idx < dsize) {
       my_value = img_array[my_idx];
     }
 
-    if (my_value == 1) {
-      write_idx_as = atomicAdd(&s_num_as, 1);
-      if (write_idx_as < TILE_SIZE) {
-        s_as[write_idx_as] = my_idx;
-      }
-    } else if (my_value == 2) {
-      write_idx_bs = atomicAdd(&s_num_bs, 1);
-      if (write_idx_bs < TILE_SIZE) {
-        s_bs[write_idx_bs] = my_idx;
+    if (my_value != 0) {
+      write_idx_as = atomicAdd(&s_num_nonzeros, 1);
+      if (write_idx_as < TILE_SIZE_INDEXING) {
+        s_nonzero_idxs[write_idx_as] = my_idx;
+        s_nonzero_values[write_idx_as] = my_value;
       }
     }
 
     __syncthreads();
 
-    bool needs_flush_as = s_num_as >= TILE_SIZE;
-    bool needs_flush_bs = s_num_bs >= TILE_SIZE;
+    bool needs_flush = s_num_nonzeros >= TILE_SIZE_INDEXING;
 
-    if (needs_flush_as) {
-      flush_buffer(s_as, s_num_as, as, num_as);
-    }
-    if (needs_flush_bs) {
-      flush_buffer(s_bs, s_num_bs, bs, num_bs);
+    if (needs_flush) {
+      flush_buffer(s_nonzero_idxs, s_nonzero_values, s_num_nonzeros,
+                      g_nonzero_idxs, g_nonzero_values, g_num_nonzeros);
     }
 
-    if (needs_flush_as && write_idx_as >= TILE_SIZE) {
-      s_as[write_idx_as - TILE_SIZE] = my_idx;
-    }
-    if (needs_flush_bs && write_idx_bs >= TILE_SIZE) {
-      s_bs[write_idx_bs - TILE_SIZE] = my_idx;
+    if (needs_flush && write_idx_as >= TILE_SIZE_INDEXING) {
+      s_nonzero_idxs[write_idx_as - TILE_SIZE_INDEXING] = my_idx;
+      s_nonzero_values[write_idx_as - TILE_SIZE_INDEXING] = my_value;
     }
 
     __syncthreads();
@@ -103,6 +97,6 @@ __global__ void index_shapes(int *img_array, int dsize, int *as,
     block_base_idx += gridDim.x * blockDim.x;
   }
 
-  flush_buffer_final(s_as, s_num_as, as, num_as);
-  flush_buffer_final(s_bs, s_num_bs, bs, num_bs);
+  flush_buffer_final(s_nonzero_idxs, s_nonzero_values, s_num_nonzeros,
+                        g_nonzero_idxs, g_nonzero_values, g_num_nonzeros);
 }

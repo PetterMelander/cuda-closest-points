@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <vector>
 
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
@@ -34,18 +35,9 @@ int num_blocks_max_occupancy(KernelFunc kernel, int blockSize,
   return static_cast<int>(total_blocks * oversubscription_factor);
 }
 
-std::tuple<int, int> launch_index_shapes(const int *const h_image,
-                                         const int img_height,
-                                         const int img_width, int *d_as,
-                                         int *d_bs);
+std::vector<std::vector<Pair>>
+get_pairs(const int *const h_image, const int img_height, const int img_width);
 
-Pair launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
-                                  int *d_as, int *d_bs);
-
-Pair launch_min_pair_thread_per_pair(int num_as, int num_bs,
-                                     const int img_width, int *d_as, int *d_bs);
-
-Pair get_min_pair(const int *const h_image, const int img_height,
-                  const int img_width);
+std::vector<int> detect_masks(int *d_image, int total_pixels);
 
 #endif

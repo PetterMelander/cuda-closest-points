@@ -1,4 +1,5 @@
 #include "../include/host_code.cuh"
+#include <iostream>
 #include <random>
 
 int main() {
@@ -10,21 +11,22 @@ int main() {
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_real_distribution<> dis(0.0, 1.0);
+  std::uniform_int_distribution<> dis2(1, 4);
 
   // Assign 10% to 1, 10% to 2, rest to 0
   for (int i = 0; i < total_pixels; ++i) {
     double r = dis(gen);
-    if (r < 0.001)
-      image[i] = 1;
-    else if (r < 0.002)
-      image[i] = 2;
+    if (r < 0.25)
+      image[i] = dis2(gen);
     else
       image[i] = 0;
   }
 
-  Pair min_pair = get_min_pair(image, img_size, img_size);
+  std::vector<std::vector<Pair>> pairs = get_pairs(image, img_size, img_size);
 
-  printf("Distance: %d\nIndex 1: (%d, %d)\nIndex 2: (%d, %d)\n",
-         min_pair.distance, min_pair.ax, min_pair.ay, min_pair.bx, min_pair.by);
-  return 0;
+  for (auto vec : pairs) {
+    for (auto pair : vec) {
+      std::cout << pair.a;
+    }
+  }
 }

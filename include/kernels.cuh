@@ -6,11 +6,11 @@
 #include <cooperative_groups.h>
 
 #define THREADS_PER_BLOCK 512
-#define TILE_SIZE 2048
+#define TILE_SIZE_INDEXING 2048
 #define WARP_SIZE 32
 
-__global__ void index_shapes(int *img_array, int dsize, int *as, int *num_as,
-                             int *bs, int *num_bs);
+__global__ void find_nonzeros(int *img_array, int dsize, int *g_nonzero_idxs,
+                                int *g_nonzero_values, int *g_num_nonzeros);
 
 __global__ void min_distances_thread_per_a(int *as, int *bs, int num_as,
                                            int num_bs, int img_width,

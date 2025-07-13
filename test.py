@@ -7,17 +7,17 @@ img_size = 1024
 image = np.full((img_size, img_size), 0, dtype=np.int32)
 for i in range(img_size):
     for j in range(img_size):
-        rand_val = random.random()
-        if rand_val < 0.1:
-            image[i, j] = 1
-        elif rand_val < 0.2:
-            image[i, j] = 2
+        rand_float = random.random()
+        rand_val = random.randint(1, 4)
+        if rand_float < 0.001:
+            image[i, j] = rand_val
 # image[0,0] = 1
-# image[256, 512] = 2
+# image[0, 512] = 2
+# image[512, 0] = 3
 
-result_pair = closest_points_cuda.closest_points(image)
+result_pairs = closest_points_cuda.closest_points(image)
 
 print("\n--- Results ---")
-print(f"Calculated distance: {result_pair.distance}")
-print(f"Point A: ({result_pair.ax}, {result_pair.ay})")
-print(f"Point B: ({result_pair.bx}, {result_pair.by})")
+for i in result_pairs:
+    for j in i:
+        print(j)

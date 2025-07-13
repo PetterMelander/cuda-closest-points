@@ -168,17 +168,15 @@ __global__ void min_distances_thread_per_pair(int2 *points_a, int2 *points_b,
   int min_distance = INT_MAX;
   int min_x_idx = -1;
   int min_y_idx = -1;
-  for (int i = blockIdx.x; i < (num_as + blockDim.x - 1) / blockDim.x;
-       i += gridDim.x) {
-    int x_idx = i * blockDim.x + threadIdx.x;
+  for (int x_idx = threadIdx.x + blockIdx.x * blockDim.x; x_idx < num_as;
+       x_idx += gridDim.x * blockDim.x) {
 
     int2 my_a;
     if (x_idx < num_as)
       my_a = points_a[x_idx];
 
-    for (int j = blockIdx.y; j < (num_bs + blockDim.y - 1) / blockDim.y;
-         j += gridDim.y) {
-      int y_idx = j * blockDim.y + threadIdx.y;
+    for (int y_idx = threadIdx.y + blockIdx.y * blockDim.y; y_idx < num_bs;
+         y_idx += gridDim.y * blockDim.y) {
 
       if (x_idx < num_as && y_idx < num_bs) {
         int2 my_b = points_b[y_idx];
