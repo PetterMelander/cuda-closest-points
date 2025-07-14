@@ -142,8 +142,7 @@ std::tuple<vector<int>, vector<int>, int> index_masks(const int *const h_image,
 }
 
 void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
-                                  int *d_as, int *d_bs,
-                                  PinnedVector<MinResult> &h_results,
+                                  int *d_as, int *d_bs, MinResult &h_result,
                                   cudaStream_t stream) {
 
   // Kernel parallelizes over a's. Launch kernel with the larger mask as a.
@@ -154,7 +153,7 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
   }
 
   int num_blocks = (num_as + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-  h_results.resize(num_blocks);
+  // h_results.resize(num_blocks);
 
   MinResult *d_results;
   CUDA_CHECK(
@@ -164,15 +163,18 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
       d_as, d_bs, num_as, num_bs, img_width, d_results, swapped);
   CUDA_CHECK(cudaGetLastError());
 
-  CUDA_CHECK(cudaMemcpyAsync(h_results.data(), d_results,
-                             sizeof(MinResult) * num_blocks,
+  final_reduction<<<1, THREADS_PER_BLOCK, 0, stream>>>(d_results, num_blocks,
+                                                       d_results);
+  CUDA_CHECK(cudaGetLastError());
+
+  CUDA_CHECK(cudaMemcpyAsync(&h_result, d_results, sizeof(MinResult),
                              cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaFreeAsync(d_results, stream));
 }
 
 void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
                                      const int img_width, int *d_as, int *d_bs,
-                                     PinnedVector<MinResult> &h_results,
+                                     MinResult &h_results,
                                      cudaStream_t stream) {
 
   uint block_dim = 16;
@@ -183,7 +185,7 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
   uint grid_dim = (uint)sqrt(num_blocks);
   dim3 grid_size{grid_dim, grid_dim};
   num_blocks = (int)grid_dim * (int)grid_dim;
-  h_results.resize(num_blocks);
+  // h_results.resize(num_blocks);
 
   MinResult *d_results;
   CUDA_CHECK(
@@ -199,8 +201,11 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
       d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
   CUDA_CHECK(cudaGetLastError());
 
-  CUDA_CHECK(cudaMemcpyAsync(h_results.data(), d_results,
-                             sizeof(MinResult) * num_blocks,
+  final_reduction<<<1, THREADS_PER_BLOCK, 0, stream>>>(d_results, num_blocks,
+                                                       d_results);
+  CUDA_CHECK(cudaGetLastError());
+
+  CUDA_CHECK(cudaMemcpyAsync(&h_results, d_results, sizeof(MinResult),
                              cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaFreeAsync(d_points_a, stream));
   CUDA_CHECK(cudaFreeAsync(d_points_b, stream));
@@ -208,19 +213,19 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
 }
 
 void get_min_pairs(int *d_as, int *d_bs, int num_as, int num_bs, int img_width,
-                   PinnedVector<MinResult> &h_results, cudaStream_t stream) {
+                   MinResult &h_result, cudaStream_t stream) {
   long long num_pairs = (long long)num_as * (long long)num_bs;
   int max_mask_size = std::max(num_as, num_bs);
   if (num_pairs > (long long)INT_MAX || max_mask_size > 5000) {
     launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs,
-                                 h_results, stream);
+                                 h_result, stream);
   } else {
     launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
-                                    h_results, stream);
+                                    h_result, stream);
   }
 }
 
-vector<vector<PinnedVector<MinResult>>>
+vector<PinnedVector<MinResult>>
 initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
                         int num_unique_values, int *d_sorted_idxs,
                         int img_width) {
@@ -231,8 +236,8 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
     CUDA_CHECK(cudaStreamCreate(&stream));
   }
 
-  vector<vector<PinnedVector<MinResult>>> h_unreduced_result_vectors(
-      num_unique_values, vector<PinnedVector<MinResult>>(num_unique_values));
+  vector<PinnedVector<MinResult>> h_results(
+      num_unique_values, PinnedVector<MinResult>(num_unique_values));
 
   int stream_number = 0;
   int a_offset = 0;
@@ -248,7 +253,7 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int *b_ptr = d_sorted_idxs + b_offset;
 
       get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width,
-                    h_unreduced_result_vectors[i][j], streams[stream_number]);
+                    h_results[i][j], streams[stream_number]);
 
       b_offset += num_bs;
       ++stream_number;
@@ -261,7 +266,7 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
     CUDA_CHECK(cudaStreamDestroy(stream));
   }
 
-  return h_unreduced_result_vectors;
+  return h_results;
 }
 
 vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
@@ -279,7 +284,7 @@ vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
   CUDA_CHECK(cudaFree(d_sorted_values));
 
   // Calculate (not completely reduced) pixel pairings between all masks
-  vector<vector<PinnedVector<MinResult>>> h_unreduced_pixel_pairs =
+  vector<PinnedVector<MinResult>> h_pixel_pairs =
       initial_pair_reductions(unique_values, mask_sizes, num_unique_values,
                               d_sorted_idxs, img_width);
   CUDA_CHECK(cudaFree(d_sorted_idxs));
@@ -293,7 +298,7 @@ vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
       if (i == j)
         result = MinResult{0, -1, -1};
       else
-        result = cpu_reduction(h_unreduced_pixel_pairs[i][j]);
+        result = h_pixel_pairs[i][j];
       Pair pair;
       pair.a = unique_values[i];
       pair.ax = result.a_idx % img_width;

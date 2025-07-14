@@ -78,8 +78,7 @@ __global__ void final_reduction(MinResult *input, int num_elements,
   min_result.distance = INT_MAX;
   __shared__ MinResult smem[WARP_SIZE];
 
-  int tid = threadIdx.x + blockIdx.x * blockDim.x;
-  for (int i = tid; i < num_elements; i += blockDim.x) {
+  for (int i = threadIdx.x; i < num_elements; i += blockDim.x) {
     MinResult new_result = input[i];
     if (new_result.distance < min_result.distance)
       min_result = new_result;
@@ -87,6 +86,24 @@ __global__ void final_reduction(MinResult *input, int num_elements,
 
   warp_shuffle_reduction(min_result, smem, output);
 }
+
+// __global__ void final_reduction_2d(MinResult *input, int num_elements,
+//                                 MinResult *output) {
+//   MinResult min_result;
+//   min_result.a_idx = -1;
+//   min_result.b_idx = -1;
+//   min_result.distance = INT_MAX;
+//   __shared__ MinResult smem[WARP_SIZE];
+
+//   int tid = threadIdx.x + threadIdx.y * blockDim.x;
+//   for (int i = tid; i < num_elements; i += blockDim.x * blockDim.y) {
+//     MinResult new_result = input[i];
+//     if (new_result.distance < min_result.distance)
+//       min_result = new_result;
+//   }
+
+//   warp_shuffle_reduction_2d(min_result, smem, output);
+// }
 
 __global__ void min_distances_thread_per_a(int *as, int *bs, int num_as,
                                            int num_bs, int img_width,
