@@ -231,7 +231,8 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
                         int img_width) {
 
   int num_mask_combinations = (num_unique_values * (num_unique_values - 1)) / 2;
-  vector<cudaStream_t> streams(num_mask_combinations);
+  int num_streams = std::max(num_mask_combinations, 32);
+  vector<cudaStream_t> streams(num_streams);
   for (auto &stream : streams) {
     CUDA_CHECK(cudaStreamCreate(&stream));
   }
@@ -253,7 +254,7 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int *b_ptr = d_sorted_idxs + b_offset;
 
       get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width,
-                    h_results[i][j], streams[stream_number]);
+                    h_results[i][j], streams[stream_number % num_streams]);
 
       b_offset += num_bs;
       ++stream_number;
