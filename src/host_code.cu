@@ -153,7 +153,9 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
     std::swap(d_as, d_bs);
   }
 
-  int num_blocks = (num_as + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+  int num_blocks =
+      num_blocks_max_occupancy(min_distances_thread_per_a, THREADS_PER_BLOCK,
+                               sizeof(int) * THREADS_PER_BLOCK * 3, 1.f);
   h_results.resize(num_blocks);
 
   MinResult *d_results;
@@ -179,7 +181,7 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
   dim3 block_size{block_dim, block_dim};
   int num_blocks = num_blocks_max_occupancy(
       min_distances_thread_per_pair, block_dim * block_dim,
-      sizeof(MinResult) * WARP_SIZE, 1.42f);
+      sizeof(MinResult) * WARP_SIZE, 1.f);
   uint grid_dim = (uint)sqrt(num_blocks);
   dim3 grid_size{grid_dim, grid_dim};
   num_blocks = (int)grid_dim * (int)grid_dim;
