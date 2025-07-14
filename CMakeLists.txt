@@ -29,8 +29,17 @@ set(SOURCES
     src/bindings.cpp
 )
 
+include(FetchContent)
+FetchContent_Declare(
+  cpptrace
+  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+  GIT_TAG        v1.0.2 # <HASH or TAG>
+)
+FetchContent_MakeAvailable(cpptrace)
+
 # Create the Python module from the collected sources
 pybind11_add_module(closest_points_cuda ${SOURCES})
+target_link_libraries(closest_points_cuda PRIVATE cpptrace::cpptrace)
 
 # This makes headers like <cuda_runtime.h> available to both nvcc and clang++
 target_include_directories(closest_points_cuda PUBLIC
@@ -66,6 +75,7 @@ target_include_directories(run_test PRIVATE
 
 target_link_libraries(run_test PRIVATE
     ${CUDAToolkit_LIBRARIES}
+    cpptrace::cpptrace
 )
 
 target_compile_options(run_test PRIVATE

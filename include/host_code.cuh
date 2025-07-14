@@ -1,21 +1,10 @@
 #ifndef HOST_CODE_H
 #define HOST_CODE_H
 
-#include "../include/types.h"
+#include "types.h"
 #include <cstdio>
 #include <cstdlib>
-#include <cuda_runtime.h>
 #include <vector>
-
-#define CUDA_CHECK(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr, "CUDA Error at %s:%d: %s\n", __FILE__, __LINE__,         \
-              cudaGetErrorString(err));                                        \
-      exit(EXIT_FAILURE);                                                      \
-    }                                                                          \
-  } while (0)
 
 template <typename KernelFunc>
 int num_blocks_max_occupancy(KernelFunc kernel, int blockSize,
