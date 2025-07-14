@@ -10,7 +10,7 @@ for i in range(img_size):
     for j in range(img_size):
         rand_float = random.random()
         rand_val = random.randint(1, 32)
-        if rand_float < 0.001:
+        if rand_float < 0.01:
             image[i, j] = rand_val
 # image[0,0] = 1
 # image[0, 512] = 2
@@ -20,13 +20,12 @@ for i in range(img_size):
 result_pairs = closest_points_cuda.closest_points(image)
 
 print("\n--- Results ---")
-for i in result_pairs:
-    for j in i:
-        print(j)
+print(result_pairs[0][1])
 
 # for i in range(100):
 #     print(i)
 #     closest_points_cuda.closest_points(image)
 
-execution_time = timeit.timeit(lambda: closest_points_cuda.closest_points(image), number=100)
-print(execution_time / 100)
+num_runs = 1000
+execution_time = timeit.timeit(lambda: closest_points_cuda.closest_points(image), number=num_runs)
+print(execution_time / num_runs)

@@ -155,6 +155,8 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
   int num_blocks =
       num_blocks_max_occupancy(min_distances_thread_per_a, THREADS_PER_BLOCK,
                                sizeof(int) * THREADS_PER_BLOCK * 3, 1.f);
+  num_blocks = std::min(num_blocks,
+                        (num_as + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
 
   MinResult *d_results;
   CUDA_CHECK(
@@ -180,9 +182,13 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
 
   uint block_dim = 16;
   dim3 block_size{block_dim, block_dim};
-  int num_blocks = num_blocks_max_occupancy(
+  uint num_blocks = num_blocks_max_occupancy(
       min_distances_thread_per_pair, block_dim * block_dim,
       sizeof(MinResult) * WARP_SIZE, 1.f);
+  num_blocks =
+      std::min(num_blocks, (num_as * num_bs + block_dim * block_dim - 1) /
+                               block_dim * block_dim);
+
   uint grid_dim = (uint)sqrt(num_blocks);
   dim3 grid_size{grid_dim, grid_dim};
   num_blocks = (int)grid_dim * (int)grid_dim;
@@ -217,11 +223,11 @@ void get_min_pairs(int *d_as, int *d_bs, int num_as, int num_bs, int img_width,
   long long num_pairs = (long long)num_as * (long long)num_bs;
   int max_mask_size = std::max(num_as, num_bs);
   if (num_pairs > (long long)INT_MAX || max_mask_size > 5000) {
-    launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs,
-                                 h_result, stream);
+  launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs, h_result,
+                               stream);
   } else {
-    launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
-                                    h_result, stream);
+  launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
+                                  h_result, stream);
   }
 }
 
@@ -253,8 +259,8 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int b = unique_values[j];
       int *b_ptr = d_sorted_idxs + b_offset;
 
-      get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width,
-                    h_results[i][j], streams[stream_number % num_streams]);
+      get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width, h_results[i][j],
+                    streams[stream_number % num_streams]);
 
       b_offset += num_bs;
       ++stream_number;
@@ -285,9 +291,8 @@ vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
   CUDA_CHECK(cudaFree(d_sorted_values));
 
   // Calculate (not completely reduced) pixel pairings between all masks
-  vector<PinnedVector<MinResult>> h_pixel_pairs =
-      initial_pair_reductions(unique_values, mask_sizes, num_unique_values,
-                              d_sorted_idxs, img_width);
+  vector<PinnedVector<MinResult>> h_pixel_pairs = initial_pair_reductions(
+      unique_values, mask_sizes, num_unique_values, d_sorted_idxs, img_width);
   CUDA_CHECK(cudaFree(d_sorted_idxs));
 
   // For each mask pair, do final reduction on cpu
