@@ -1,8 +1,9 @@
 #include "../include/host_code.cuh"
+#include <cstring>
 #include <iostream>
 #include <random>
 
-int main() {
+int main(int argc, char *argv[]) {
   int img_size = 1024;
   int total_pixels = img_size * img_size;
   int *image = new int[total_pixels];
@@ -23,10 +24,11 @@ int main() {
   }
 
   // for (int i = 0; i < 10; ++i) {
-    // get_pairs(image, img_size, img_size);
+  // get_pairs(image, img_size, img_size);
   // }
 
-  std::vector<std::vector<Pair>> pairs = get_pairs(image, img_size, img_size);
+  std::vector<std::vector<Pair>> pairs =
+      get_pairs(image, img_size, img_size);
 
   for (auto vec : pairs) {
     for (auto pair : vec) {

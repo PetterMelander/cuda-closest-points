@@ -1,8 +1,10 @@
 #include "../include/host_code.cuh"
 #include "../include/kernels.cuh"
+#include <algorithm>
 #include <climits>
 #include <cstddef>
 #include <cub/cub.cuh>
+#include <numeric>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -219,15 +221,14 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
 }
 
 void get_min_pairs(int *d_as, int *d_bs, int num_as, int num_bs, int img_width,
-                   MinResult &h_result, cudaStream_t stream) {
-  long long num_pairs = (long long)num_as * (long long)num_bs;
-  int max_mask_size = std::max(num_as, num_bs);
-  if (num_pairs > (long long)INT_MAX || max_mask_size > 5000) {
-  launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs, h_result,
-                               stream);
+                   MinResult &h_result, cudaStream_t stream,
+                   bool use_kernel_1) {
+  if (use_kernel_1) {
+    launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs,
+                                 h_result, stream);
   } else {
-  launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
-                                  h_result, stream);
+    launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
+                                    h_result, stream);
   }
 }
 
@@ -236,7 +237,14 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
                         int num_unique_values, int *d_sorted_idxs,
                         int img_width) {
 
+  // Kernel 2 is only faster if there are very few pixel combinations in total
+  // to check
+  int num_nonzeros = std::reduce(mask_sizes.begin(), mask_sizes.end());
+  int max_mask_size = *std::max_element(mask_sizes.begin(), mask_sizes.end());
   int num_mask_combinations = (num_unique_values * (num_unique_values - 1)) / 2;
+  bool use_kernel_1 =
+      !(num_mask_combinations < 6 && max_mask_size < 75 && num_nonzeros < 150);
+
   int num_streams = std::max(num_mask_combinations, 32);
   vector<cudaStream_t> streams(num_streams);
   for (auto &stream : streams) {
@@ -260,7 +268,7 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int *b_ptr = d_sorted_idxs + b_offset;
 
       get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width, h_results[i][j],
-                    streams[stream_number % num_streams]);
+                    streams[stream_number % num_streams], use_kernel_1);
 
       b_offset += num_bs;
       ++stream_number;
@@ -291,8 +299,9 @@ vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
   CUDA_CHECK(cudaFree(d_sorted_values));
 
   // Calculate (not completely reduced) pixel pairings between all masks
-  vector<PinnedVector<MinResult>> h_pixel_pairs = initial_pair_reductions(
-      unique_values, mask_sizes, num_unique_values, d_sorted_idxs, img_width);
+  vector<PinnedVector<MinResult>> h_pixel_pairs =
+      initial_pair_reductions(unique_values, mask_sizes, num_unique_values,
+                              d_sorted_idxs, img_width);
   CUDA_CHECK(cudaFree(d_sorted_idxs));
 
   // For each mask pair, do final reduction on cpu
