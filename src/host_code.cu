@@ -1,6 +1,7 @@
 #include "../include/host_code.cuh"
 #include "../include/kernels.cuh"
 #include <climits>
+#include <cooperative_groups.h>
 #include <cstddef>
 #include <cub/cub.cuh>
 #include <tuple>
@@ -141,7 +142,7 @@ std::tuple<vector<int>, vector<int>, int> index_masks(const int *const h_image,
   return encode_runs(d_nonzero_values, h_num_nonzeros);
 }
 
-void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
+void launch_min_pair_thread_per_a(int num_as, int num_bs, int img_width,
                                   int *d_as, int *d_bs, MinResult &h_result,
                                   cudaStream_t stream) {
 
@@ -152,19 +153,25 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
     std::swap(d_as, d_bs);
   }
 
-  int num_blocks = (num_as + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-  // h_results.resize(num_blocks);
+  int num_blocks =
+      num_blocks_max_occupancy(min_distances_thread_per_a, THREADS_PER_BLOCK,
+                               sizeof(int) * THREADS_PER_BLOCK * 3, 1);
 
   MinResult *d_results;
   CUDA_CHECK(
       cudaMallocAsync(&d_results, sizeof(MinResult) * num_blocks, stream));
 
-  min_distances_thread_per_a<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-      d_as, d_bs, num_as, num_bs, img_width, d_results, swapped);
-  CUDA_CHECK(cudaGetLastError());
+  void *args[] = {&d_as,      &d_bs,      &num_as, &num_bs,
+                  &img_width, &d_results, &swapped};
 
-  final_reduction<<<1, THREADS_PER_BLOCK, 0, stream>>>(d_results, num_blocks,
-                                                       d_results);
+  // Launch the cooperative kernel
+  cudaLaunchCooperativeKernel((void *)min_distances_thread_per_a,
+                              num_blocks,        // Grid dimensions
+                              THREADS_PER_BLOCK, // Block dimensions
+                              args,              // Kernel arguments
+                              0,                 // Shared memory size
+                              stream             // CUDA stream
+  );
   CUDA_CHECK(cudaGetLastError());
 
   CUDA_CHECK(cudaMemcpyAsync(&h_result, d_results, sizeof(MinResult),
@@ -172,20 +179,18 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
   CUDA_CHECK(cudaFreeAsync(d_results, stream));
 }
 
-void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
-                                     const int img_width, int *d_as, int *d_bs,
-                                     MinResult &h_results,
+void launch_min_pair_thread_per_pair(int num_as, int num_bs, int img_width,
+                                     int *d_as, int *d_bs, MinResult &h_results,
                                      cudaStream_t stream) {
 
   uint block_dim = 16;
   dim3 block_size{block_dim, block_dim};
-  int num_blocks = num_blocks_max_occupancy(
-      min_distances_thread_per_pair, block_dim * block_dim,
-      sizeof(MinResult) * WARP_SIZE, 1.42f);
+  int num_blocks = num_blocks_max_occupancy(min_distances_thread_per_pair,
+                                            block_dim * block_dim,
+                                            sizeof(MinResult) * WARP_SIZE, 1);
   uint grid_dim = (uint)sqrt(num_blocks);
   dim3 grid_size{grid_dim, grid_dim};
   num_blocks = (int)grid_dim * (int)grid_dim;
-  // h_results.resize(num_blocks);
 
   MinResult *d_results;
   CUDA_CHECK(
@@ -197,12 +202,20 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
   make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b,
               stream);
 
+  void *args[] = {&d_points_a, &d_points_b, &num_as,
+                  &num_bs,     &img_width,  &d_results};
+
+  // Launch the cooperative kernel
+  cudaLaunchCooperativeKernel((void *)min_distances_thread_per_pair,
+                              grid_size,  // Grid dimensions
+                              block_size, // Block dimensions
+                              args,       // Kernel arguments
+                              0,          // Shared memory size
+                              stream      // CUDA stream
+  );
+
   min_distances_thread_per_pair<<<grid_size, block_size, 0, stream>>>(
       d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
-  CUDA_CHECK(cudaGetLastError());
-
-  final_reduction<<<1, THREADS_PER_BLOCK, 0, stream>>>(d_results, num_blocks,
-                                                       d_results);
   CUDA_CHECK(cudaGetLastError());
 
   CUDA_CHECK(cudaMemcpyAsync(&h_results, d_results, sizeof(MinResult),
@@ -252,8 +265,8 @@ initial_pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int b = unique_values[j];
       int *b_ptr = d_sorted_idxs + b_offset;
 
-      get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width,
-                    h_results[i][j], streams[stream_number]);
+      get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width, h_results[i][j],
+                    streams[stream_number]);
 
       b_offset += num_bs;
       ++stream_number;
@@ -284,9 +297,8 @@ vector<vector<Pair>> get_pairs(const int *const h_image, const int img_width,
   CUDA_CHECK(cudaFree(d_sorted_values));
 
   // Calculate (not completely reduced) pixel pairings between all masks
-  vector<PinnedVector<MinResult>> h_pixel_pairs =
-      initial_pair_reductions(unique_values, mask_sizes, num_unique_values,
-                              d_sorted_idxs, img_width);
+  vector<PinnedVector<MinResult>> h_pixel_pairs = initial_pair_reductions(
+      unique_values, mask_sizes, num_unique_values, d_sorted_idxs, img_width);
   CUDA_CHECK(cudaFree(d_sorted_idxs));
 
   // For each mask pair, do final reduction on cpu

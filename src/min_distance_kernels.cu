@@ -1,6 +1,9 @@
 #include "../include/kernels.cuh"
+#include <cooperative_groups.h>
 #include <thrust/execution_policy.h>
 #include <thrust/transform.h>
+
+namespace cg = cooperative_groups;
 
 __device__ __forceinline__ MinResult
 single_warp_shuffle_reduction(MinResult min_result) {
@@ -42,6 +45,42 @@ __device__ __forceinline__ void warp_shuffle_reduction(MinResult min_result,
     if (lane == 0)
       output[blockIdx.x] = min_result;
   }
+
+  cg::grid_group grid = cg::this_grid();
+  grid.sync();
+
+  if (blockIdx.x == 0) {
+    MinResult final_min = {INT_MAX, -1, -1};
+    int num_blocks = gridDim.x;
+
+    // Use a grid-stride loop for this block's threads to reduce further
+    for (int i = threadIdx.x; i < num_blocks; i += blockDim.x) {
+      MinResult val = output[i];
+      if (val.distance < final_min.distance) {
+        final_min = val;
+      }
+    }
+
+    // Reduce the results within the first block to get the final single value.
+    final_min = single_warp_shuffle_reduction(final_min);
+    if (lane == 0)
+      smem[warpID] = final_min;
+    __syncthreads();
+
+    if (warpID == 0) {
+      if (lane < blockDim.x / warpSize)
+        final_min = smem[lane];
+      else
+        final_min.distance = INT_MAX;
+
+      final_min = single_warp_shuffle_reduction(final_min);
+
+      // The very first thread of the grid writes the final result.
+      if (threadIdx.x == 0) {
+        output[0] = final_min;
+      }
+    }
+  }
 }
 
 __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
@@ -49,6 +88,7 @@ __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
                                                           MinResult *output) {
   int lane = (threadIdx.x + blockDim.x * threadIdx.y) % warpSize;
   int warpID = (threadIdx.x + blockDim.x * threadIdx.y) / warpSize;
+  int block_size = blockDim.x * blockDim.y;
 
   // First warp reduction. All warps.
   min_result = single_warp_shuffle_reduction(min_result);
@@ -58,7 +98,7 @@ __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
 
   // Second warp reduction. First warp only.
   if (warpID == 0) {
-    if (lane < blockDim.x * blockDim.y / warpSize)
+    if (lane < block_size / warpSize)
       min_result = smem[lane];
     else
       min_result.distance = INT_MAX;
@@ -67,6 +107,42 @@ __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
     // Write results to global memory. First thread of first warp only.
     if (lane == 0)
       output[blockIdx.x + blockIdx.y * gridDim.x] = min_result;
+  }
+
+  cg::grid_group grid = cg::this_grid();
+  grid.sync();
+
+  if (blockIdx.x == 0 && blockIdx.y == 0) {
+    MinResult final_min = {INT_MAX, -1, -1};
+    int num_blocks = gridDim.x * gridDim.y;
+
+    // Use a grid-stride loop for this block's threads to reduce further
+    for (int i = threadIdx.x + threadIdx.y * blockDim.x; i < num_blocks;
+         i += block_size) {
+      MinResult val = output[i];
+      if (val.distance < final_min.distance) {
+        final_min = val;
+      }
+    }
+
+    // Reduce the results within the first block to get the final single value.
+    final_min = single_warp_shuffle_reduction(final_min);
+    if (lane == 0)
+      smem[warpID] = final_min;
+    __syncthreads();
+
+    if (warpID == 0) {
+      if (lane < block_size / warpSize)
+        final_min = smem[lane];
+      else
+        final_min.distance = INT_MAX;
+      final_min = single_warp_shuffle_reduction(final_min);
+
+      // The very first thread of the grid writes the final result.
+      if (lane == 0) {
+        output[0] = final_min;
+      }
+    }
   }
 }
 
