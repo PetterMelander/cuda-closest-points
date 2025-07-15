@@ -1,8 +1,6 @@
 #ifndef TYPES_H
 #define TYPES_H
 
-#include <cpptrace/basic.hpp>
-#include <cpptrace/cpptrace.hpp>
 #include <cuda_runtime.h>
 #include <sstream>
 #include <string>
@@ -14,11 +12,9 @@
     if (err != cudaSuccess) {                                                  \
       fprintf(stderr, "CUDA Error at %s:%d: %s\n", __FILE__, __LINE__,         \
               cudaGetErrorString(err));                                        \
-      cpptrace::generate_trace().print();                                \
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   } while (0)
-
 
 struct MinResult {
   int distance;
@@ -62,7 +58,6 @@ template <typename T> struct PinnedAllocator {
   }
 };
 
-// Define a shorthand for a vector using our pinned allocator
 template <typename T> using PinnedVector = std::vector<T, PinnedAllocator<T>>;
 
 #endif

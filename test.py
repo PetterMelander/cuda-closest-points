@@ -5,7 +5,7 @@ import timeit
 
 # --- Create some test data ---
 num_masks = 32
-proportion_masked = 0.01
+proportion_masked = 0.2
 img_size = 1024
 
 image = np.full((img_size, img_size), 0, dtype=np.int32)
