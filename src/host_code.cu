@@ -144,7 +144,7 @@ index_masks(const int *const h_image, int img_height, int img_width,
 
 void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
                                   int *d_as, int *d_bs, MinResult &h_result,
-                                  cudaStream_t stream, bool use_kernel_1_int2) {
+                                  cudaStream_t stream) {
 
   // Kernel parallelizes over a's. Launch kernel with the larger mask as a.
   bool swapped = num_as < num_bs;
@@ -159,20 +159,8 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
   CUDA_CHECK(
       cudaMallocAsync(&d_results, sizeof(MinResult) * num_blocks, stream));
 
-  if (use_kernel_1_int2) {
-    int2 *d_points_a, *d_points_b;
-    CUDA_CHECK(cudaMallocAsync(&d_points_a, sizeof(int2) * num_as, stream));
-    CUDA_CHECK(cudaMallocAsync(&d_points_b, sizeof(int2) * num_bs, stream));
-    make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b,
-                stream);
-    min_distances_thread_per_a_int2<<<num_blocks, block_size, 0, stream>>>(
-        d_points_a, d_points_b, num_as, num_bs, img_width, d_results, swapped);
-    CUDA_CHECK(cudaFreeAsync(d_points_a, stream));
-    CUDA_CHECK(cudaFreeAsync(d_points_b, stream));
-  } else {
-    min_distances_thread_per_a<<<num_blocks, block_size, 0, stream>>>(
-        d_as, d_bs, num_as, num_bs, img_width, d_results, swapped);
-  }
+  min_distances_thread_per_a<<<num_blocks, block_size, 0, stream>>>(
+      d_as, d_bs, num_as, num_bs, img_width, d_results, swapped);
   CUDA_CHECK(cudaGetLastError());
 
   final_reduction<<<1, block_size, 0, stream>>>(d_results, num_blocks,
@@ -219,11 +207,11 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
 }
 
 void get_min_pairs(int *d_as, int *d_bs, int num_as, int num_bs, int img_width,
-                   MinResult &h_result, cudaStream_t stream, bool use_kernel_1,
-                   bool use_kernel_1_int2) {
+                   MinResult &h_result, cudaStream_t stream,
+                   bool use_kernel_1) {
   if (use_kernel_1) {
     launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs,
-                                 h_result, stream, use_kernel_1_int2);
+                                 h_result, stream);
   } else {
     launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
                                     h_result, stream);
@@ -241,7 +229,6 @@ pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
   int num_mask_combinations = (num_unique_values * (num_unique_values - 1)) / 2;
   bool use_kernel_1 =
       !(num_mask_combinations < 6 && max_mask_size < 75 && num_nonzeros < 150);
-  bool user_kernel_1_int2 = num_mask_combinations == 1;
 
   int num_streams = std::min(num_mask_combinations, 32);
   vector<cudaStream_t> streams(num_streams);
@@ -266,8 +253,7 @@ pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int *b_ptr = d_sorted_idxs + b_offset;
 
       get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width, h_results[i][j],
-                    streams[stream_number % num_streams], use_kernel_1,
-                    user_kernel_1_int2);
+                    streams[stream_number % num_streams], use_kernel_1);
 
       b_offset += num_bs;
       ++stream_number;

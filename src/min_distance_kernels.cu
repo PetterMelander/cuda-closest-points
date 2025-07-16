@@ -115,65 +115,6 @@ __global__ void final_reduction(MinResult *input, int num_elements,
   warp_shuffle_reduction(min_result, smem, output);
 }
 
-__global__ void min_distances_thread_per_a_int2(
-    const int2 *__restrict__ as, const int2 *__restrict__ bs, int num_as,
-    int num_bs, int img_width, MinResult *block_results, bool order_swapped) {
-  int tid = threadIdx.x + block_size * blockIdx.x;
-  __shared__ union {
-    struct {
-      int x[block_size];
-      int y[block_size];
-    } bs_coords;
-    MinResult min_results[warp_size];
-  } smem;
-  int2 my_a, min_b = {-1, -1};
-  int min_distance = INT_MAX;
-
-  if (tid < num_as) {
-    my_a = as[tid];
-  }
-  // Loop over all bs in blocks, loading into shared memory. Each thread finds
-  // its closest b.
-  for (int b_block = 0; b_block < (num_bs + block_size - 1) / block_size;
-       ++b_block) {
-    int b_idx = b_block * block_size + threadIdx.x;
-    if (b_idx < num_bs) {
-      smem.bs_coords.x[threadIdx.x] = bs[b_idx].x;
-      smem.bs_coords.y[threadIdx.x] = bs[b_idx].y;
-    }
-    __syncthreads();
-
-    if (tid < num_as) {
-      for (int j = 0; j < block_size; ++j) {
-        if (b_block * block_size + j == num_bs)
-          break;
-        int b_x = smem.bs_coords.x[j];
-        int b_y = smem.bs_coords.y[j];
-        int dx = b_x - my_a.x;
-        int dy = b_y - my_a.y;
-        int distance = dx * dx + dy * dy;
-        if (distance < min_distance) {
-          min_distance = distance;
-          min_b.x = b_x;
-          min_b.y = b_y;
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  MinResult min_result;
-  min_result.distance = min_distance;
-  if (order_swapped) {
-    min_result.a_idx = min_b.x + min_b.y * img_width;
-    min_result.b_idx = my_a.x + my_a.y * img_width;
-  } else {
-    min_result.a_idx = my_a.x + my_a.y * img_width;
-    min_result.b_idx = min_b.x + min_b.y * img_width;
-  }
-  warp_shuffle_reduction(min_result, smem.min_results, block_results);
-}
-
 __global__ void min_distances_thread_per_a(
     const int *__restrict__ as, const int *__restrict__ bs, int num_as,
     int num_bs, int img_width, MinResult *block_results, bool order_swapped) {
