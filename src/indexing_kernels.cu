@@ -18,6 +18,18 @@ __host__ dim3 get_grid_dims_indexing(int img_height, int img_width) {
   return grid_size;
 }
 
+/**
+ * @brief Writes the shared buffer to global memory.
+ *
+ * This function is called when the shared buffer is full.
+ *
+ * @param s_buffer_idxs Shared buffer of indices.
+ * @param s_buffer_values Shared buffer of values.
+ * @param s_count Shared element counter.
+ * @param g_buffer_idxs Global buffer of indices.
+ * @param g_buffer_values Global buffer of values.
+ * @param g_count Global element counter.
+ */
 __device__ void flush_buffer(int *s_buffer_idxs, int *s_buffer_values,
                              int &s_count, int *g_buffer_idxs,
                              int *g_buffer_values, int *g_count) {
@@ -46,6 +58,18 @@ __device__ void flush_buffer(int *s_buffer_idxs, int *s_buffer_values,
   __syncthreads();
 }
 
+/**
+ * @brief Writes the shared buffer to global memory.
+ *
+ * This function is called when the kernel ends, even if the buffer is not full.
+ *
+ * @param s_buffer_idxs Shared buffer of indices.
+ * @param s_buffer_values Shared buffer of values.
+ * @param s_count Shared element counter.
+ * @param g_buffer_idxs Global buffer of indices.
+ * @param g_buffer_values Global buffer of values.
+ * @param g_count Global element counter.
+ */
 __device__ void flush_buffer_final(int *s_buffer_idxs, int *s_buffer_values,
                                    int s_count, int *g_buffer_idxs,
                                    int *g_buffer_values, int *g_count) {
@@ -66,16 +90,29 @@ __device__ void flush_buffer_final(int *s_buffer_idxs, int *s_buffer_values,
   }
 }
 
+/**
+ * @brief Determines if a pixel is a mask edge.
+ *
+ * @param center Mask value of the thread's pixel.
+ * @param g_valid If the pixel is part of the image.
+ * @param l_valid If the pixel is part of the block's tile.
+ * @param gidx x index of pixel.
+ * @param gidy y index of pixel.
+ * @param img_height Image height in pixels.
+ * @param img_width Image width in pixels.
+ * @param s_tile Tile of shared memory, used for sharing top and bottom values.
+ * @return Whether the thread's pixel is a mask edge.
+ */
 __device__ __forceinline__ bool
-is_edge(int center, bool g_valid, bool l_valid, int base_gidx, int gidy,
+is_edge(int center, bool g_valid, bool l_valid, int gidx, int gidy,
         int img_height, int img_width, int s_tile[block_size_y][block_size_x]) {
   int left = __shfl_up_sync(full_mask, center, 1);
   int right = __shfl_down_sync(full_mask, center, 1);
   if ((center != 0 && g_valid && l_valid)) {
     int top, bottom;
-    if (base_gidx == 0)
+    if (gidx == 0)
       left = center;
-    if (base_gidx == img_width - 1)
+    if (gidx == img_width - 1)
       right = center;
     if (gidy == 0)
       top = center;
@@ -92,9 +129,30 @@ is_edge(int center, bool g_valid, bool l_valid, int base_gidx, int gidy,
   return false;
 }
 
+/**
+ * @brief Finds all mask edge pixels and write indices and values to gmem.
+ *
+ * In this kernel, each thread block has a halo of one. The threads responsible
+ * for the halo only participate in data loading. The value of each thread is
+ * loaded into shared memory so it can be accessed by neighbouring threads.
+ *
+ * To write indices of edge pixels to gmem, in a 1d array of unknown length,
+ * atomics are used. To reduce the atomics pressure, each thread block first
+ * accumulates its values in a shared buffer before writing to gmem.
+ *
+ * The kernel has each thread read several pixels from gmem up front to hide
+ * latency.
+ *
+ * @param image Image array.
+ * @param img_height Image height in pixels.
+ * @param img_width Image width in pixels.
+ * @param g_mask_idxs Array to write mask indices to.
+ * @param g_mask_values Array to write mask values to.
+ * @param g_num_mask_pixels Variable to write number of mask pixels to.
+ */
 __global__ void index_edges(const int *__restrict__ image, int img_height,
-                            int img_width, int *g_nonzero_idxs,
-                            int *g_nonzero_values, int *g_num_nonzeros) {
+                            int img_width, int *g_mask_idxs, int *g_mask_values,
+                            int *g_num_mask_pixels) {
 
   bool l_valid = threadIdx.x > 0 && threadIdx.x < block_size_x - 1 &&
                  threadIdx.y > 0 && threadIdx.y < block_size_y - 1;
@@ -152,7 +210,7 @@ __global__ void index_edges(const int *__restrict__ image, int img_height,
     bool needs_flush = s_num_nonzeros >= buffer_size;
     if (needs_flush) {
       flush_buffer(s_nonzero_idxs, s_nonzero_values, s_num_nonzeros,
-                   g_nonzero_idxs, g_nonzero_values, g_num_nonzeros);
+                   g_mask_idxs, g_mask_values, g_num_mask_pixels);
     }
 
     if (needs_flush && write_idx_as >= buffer_size) {
@@ -162,5 +220,5 @@ __global__ void index_edges(const int *__restrict__ image, int img_height,
     __syncthreads();
   }
   flush_buffer_final(s_nonzero_idxs, s_nonzero_values, s_num_nonzeros,
-                     g_nonzero_idxs, g_nonzero_values, g_num_nonzeros);
+                     g_mask_idxs, g_mask_values, g_num_mask_pixels);
 }

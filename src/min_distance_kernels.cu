@@ -10,9 +10,7 @@ constexpr unsigned int full_mask = 0xffffffff;
 __host__ int get_block_size_distance() { return block_size; }
 
 __host__ int get_grid_size_distance(int num_as) {
-  int num_blocks = num_blocks_max_occupancy(
-      min_distances_thread_per_a, block_size, sizeof(int2) * block_size, 0.5f);
-  return std::min(num_blocks, (num_as + block_size - 1) / block_size);
+  return (num_as + block_size - 1) / block_size;
 }
 
 __host__ dim3 get_block_dims_distance_2d() {
@@ -21,16 +19,18 @@ __host__ dim3 get_block_dims_distance_2d() {
 }
 
 __host__ dim3 get_grid_dims_2d(int num_as, int num_bs) {
-  int num_blocks = num_blocks_max_occupancy(min_distances_thread_per_pair,
-                                            block_size_2d * block_size_2d,
-                                            sizeof(MinResult) * warp_size, 1.f);
-  num_blocks = std::min(num_blocks,
-                        (num_as * num_bs + block_size_2d * block_size_2d - 1) /
-                            block_size_2d * block_size_2d);
+  int num_blocks = (num_as * num_bs + block_size_2d * block_size_2d - 1) /
+                   block_size_2d * block_size_2d;
   uint grid_dim = (uint)sqrt(num_blocks);
   return dim3{grid_dim, grid_dim};
 }
 
+/**
+ * @brief Perform a warp shuffle reduction for the warp.
+ *
+ * @param min_result The thread's min result so far.
+ * @return The warp's min result.
+ */
 __device__ __forceinline__ MinResult
 single_warp_shuffle_reduction(MinResult min_result) {
   for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
@@ -46,6 +46,13 @@ single_warp_shuffle_reduction(MinResult min_result) {
   return min_result;
 }
 
+/**
+ * @brief Perform a warp shuffle reduction on block level.
+ *
+ * @param min_result The thread's min result so far.
+ * @param smem Shared memory that each warp writes its min value to.
+ * @param output MinResult array in gmem that each block writes to.
+ */
 __device__ __forceinline__ void warp_shuffle_reduction(MinResult min_result,
                                                        MinResult *smem,
                                                        MinResult *output) {
@@ -72,6 +79,14 @@ __device__ __forceinline__ void warp_shuffle_reduction(MinResult min_result,
   }
 }
 
+/**
+ * @brief Perform a warp shuffle reduction on block level. Specialized for a
+ * kernel using 2d blocks.
+ *
+ * @param min_result The thread's min result so far.
+ * @param smem Shared memory that each warp writes its min value to.
+ * @param output MinResult array in gmem that each block writes to.
+ */
 __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
                                                           MinResult *smem,
                                                           MinResult *output) {
@@ -98,6 +113,14 @@ __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
   }
 }
 
+/**
+ * @brief A kernel that uses a single thread block to reduce the input array to
+ * a single value.
+ *
+ * @param input Array of MinResults to be reduced.
+ * @param num_elements Number of elements in input array.
+ * @param output Pointer to write result to.
+ */
 __global__ void final_reduction(MinResult *input, int num_elements,
                                 MinResult *output) {
   MinResult min_result;
@@ -115,6 +138,23 @@ __global__ void final_reduction(MinResult *input, int num_elements,
   warp_shuffle_reduction(min_result, smem, output);
 }
 
+/**
+ * @brief Find the pixels that are closest to each other in two masks.
+ *
+ * The kernel has each thread attend to one pixel of mask a. It then loops over
+ * all pixels of mask b in tiles, loading them into shared memory.
+ *
+ * This kernel does not do a complete reduction. It only reduces the input array
+ * to one element per block.
+ *
+ * @param as Array of 1d pixel indices of mask a.
+ * @param bs Array of 1d pixel indices of mask b.
+ * @param num_as Number of pixels in mask a.
+ * @param num_bs Number of pixels in mask b.
+ * @param img_width Image width in pixels.
+ * @param block_results Array of MinResults to write results to.
+ * @param order_swapped Whether a and b have been swapped before kernel launch.
+ */
 __global__ void min_distances_thread_per_a(
     const int *__restrict__ as, const int *__restrict__ bs, int num_as,
     int num_bs, int img_width, MinResult *block_results, bool order_swapped) {
@@ -177,10 +217,29 @@ __global__ void min_distances_thread_per_a(
   warp_shuffle_reduction(min_result, smem.min_results, block_results);
 }
 
+/**
+ * @brief Helper function for converting a 1d index into 2d.
+ *
+ * @param idx 1d image index.
+ * @param img_width Image width in pixels.
+ * @return __host__ int2 representing 2d pixel index.
+ */
 __host__ __device__ int2 idx_to_point(int idx, int img_width) {
   return make_int2(idx % img_width, idx / img_width);
 }
 
+/**
+ * @brief Use thrust to transform arrays of 1d pixel indices to 2d.
+ *
+ * @param as 1d indices of pixels in mask a.
+ * @param bs 1d indices of pixals in mask b.
+ * @param num_as Number of pixels in mask a.
+ * @param num_bs Number of pixels in mask b.
+ * @param img_width Image width in pixels.
+ * @param points_a Output array for mask a.
+ * @param points_b Output array for mask b.
+ * @param stream Cuda stream to do work in.
+ */
 __host__ void make_points(int *as, int *bs, int num_as, int num_bs,
                           int img_width, int2 *points_a, int2 *points_b,
                           cudaStream_t stream) {
@@ -193,6 +252,24 @@ __host__ void make_points(int *as, int *bs, int num_as, int num_bs,
   thrust::transform(policy, bs, bs + num_bs, points_b, op);
 }
 
+/**
+ * @brief Find the pixels that are closest to each other in two masks.
+ *
+ * The kernel has each thread attend to one pair of pixels. Because there is no
+ * data reuse, it uses no shared memory. Also, since there is no opportunity to
+ * reuse expensive conversions from 1d index to 2d for distance calculation,
+ * this kernel expects 2d pixel indices as inputs.
+ *
+ * This kernel does not do a complete reduction. It only reduces the input array
+ * to one element per block.
+ *
+ * @param points_a 2d indices of pixels in mask a.
+ * @param points_b 2d indices of pixels in mask b.
+ * @param num_as Number of pixels in mask a.
+ * @param num_bs Number of pixels in mask b.
+ * @param img_width Image width in pixels.
+ * @param block_results Array of MinResults to write results to.
+ */
 __global__ void min_distances_thread_per_pair(const int2 *__restrict__ points_a,
                                               const int2 *__restrict__ points_b,
                                               int num_as, int num_bs,

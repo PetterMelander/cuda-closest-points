@@ -6,6 +6,14 @@
 
 namespace py = pybind11;
 
+/**
+ * @brief Takes in a numpy array, runs some basic checks, and calls main
+ * function.
+ *
+ * @param image Numpy array.
+ * @return std::vector<std::vector<Pair>> 2d array of pixel pairs with minimum
+ * distance between masks.
+ */
 std::vector<std::vector<Pair>>
 closest_points(const py::array_t<const int> &image) {
   auto buf = image.request();

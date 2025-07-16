@@ -3,7 +3,6 @@
 
 #include <cuda_runtime.h>
 #include <sstream>
-#include <string>
 #include <vector>
 
 #define CUDA_CHECK(call)                                                       \
@@ -16,12 +15,22 @@
     }                                                                          \
   } while (0)
 
+/**
+ * @brief A struct representing two pixels, with 1d indices, and their distance.
+ * Used for internal functions.
+ *
+ */
 struct MinResult {
   int distance;
   int a_idx;
   int b_idx;
 };
 
+/**
+ * @brief A struct representing a pair of pixels in two masks, with mask values,
+ * indices, and distance. Used as final output of the algorithm.
+ *
+ */
 struct Pair {
   int a;
   int ax;
@@ -42,6 +51,12 @@ struct Pair {
   }
 };
 
+/**
+ * @brief An allocator for a std::vector that allocates elements in pinned
+ * memory for use in async memory transfers.
+ *
+ * @tparam T Type of elemnt to put in the vector.
+ */
 template <typename T> struct PinnedAllocator {
   using value_type = T;
 
