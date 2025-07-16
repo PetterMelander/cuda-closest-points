@@ -23,7 +23,7 @@ __global__ void find_edges(const int *__restrict__ image, int img_height,
 
   left = __shfl_up_sync(FULL_MASK, center, 1);
   right = __shfl_down_sync(FULL_MASK, center, 1);
-  if (g_valid && l_valid) {
+  if (center != 0 && g_valid && l_valid) {
 
     if (gidx <= 0)
       left = center;

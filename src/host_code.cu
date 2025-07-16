@@ -121,6 +121,7 @@ index_masks(const int *const h_image, int img_height, int img_width,
   // Find edges
   int *d_edges;
   CUDA_CHECK(cudaMalloc(&d_edges, sizeof(int) * total_pixels));
+  CUDA_CHECK(cudaMemset(d_edges, 0, sizeof(int) * total_pixels));
   dim3 block_size(BLOCK_SIZE_EDGE_FIND_X, BLOCK_SIZE_EDGE_FIND_Y);
   uint num_blocks_x =
       (img_width + BLOCK_SIZE_EDGE_FIND_X - 2 - 1) / BLOCK_SIZE_EDGE_FIND_X - 2;
