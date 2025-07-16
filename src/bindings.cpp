@@ -18,7 +18,6 @@ closest_points(const py::array_t<const int> &image) {
   const int *const ptr = static_cast<const int *const>(buf.ptr);
   std::vector<std::vector<Pair>> min_pairs = get_pairs(ptr, height, width);
 
-  // Swap coordinates from cuda (x,y) ordering to numpy (row, col)
   return min_pairs;
 }
 

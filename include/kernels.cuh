@@ -5,17 +5,23 @@
 #include <climits>
 #include <cooperative_groups.h>
 
-constexpr int THREADS_PER_BLOCK = 256;
-constexpr int TILE_SIZE_INDEXING = 2048;
-constexpr int WARP_SIZE = 32;
-constexpr unsigned int FULL_MASK = 0xffffffff;
-constexpr int BLOCK_SIZE_EDGE_FIND_X = 32;
-constexpr int BLOCK_SIZE_EDGE_FIND_Y = 16;
-constexpr int BLOCK_SIZE_2D_DISTANCE = 16;
+template <typename KernelFunc>
+int num_blocks_max_occupancy(KernelFunc kernel, int blockSize,
+                             size_t smem_per_block,
+                             float oversubscription_factor) {
+  int deviceId;
+  CUDA_CHECK(cudaGetDevice(&deviceId));
 
-__global__ void find_nonzeros(const int *__restrict__ img_array, int dsize,
-                              int *g_nonzero_idxs, int *g_nonzero_values,
-                              int *g_num_nonzeros);
+  cudaDeviceProp props;
+  CUDA_CHECK(cudaGetDeviceProperties(&props, deviceId));
+
+  int max_active_blocks_per_sm;
+  CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &max_active_blocks_per_sm, kernel, blockSize, smem_per_block));
+
+  int total_blocks = props.multiProcessorCount * max_active_blocks_per_sm;
+  return static_cast<int>(total_blocks * oversubscription_factor);
+}
 
 __global__ void min_distances_thread_per_a(
     const int *__restrict__ as, const int *__restrict__ bs, int num_as,
@@ -38,7 +44,20 @@ __global__ void min_distances_thread_per_pair(const int2 *__restrict__ points_a,
 __global__ void final_reduction(MinResult *input, int num_elements,
                                 MinResult *output);
 
-__global__ void find_edges(const int *__restrict__ image, int img_height,
-                           int img_width, int *output);
+__global__ void index_edges(const int *__restrict__ image, int img_height,
+                            int img_width, int *g_nonzero_idxs,
+                            int *g_nonzero_values, int *g_num_nonzeros);
+
+__host__ dim3 get_block_dims_indexing();
+
+__host__ dim3 get_grid_dims_indexing(int img_height, int img_width);
+
+__host__ int get_block_size_distance();
+
+__host__ int get_grid_size_distance(int num_as);
+
+__host__ dim3 get_block_dims_distance_2d();
+
+__host__ dim3 get_grid_dims_2d(int num_as, int num_bs);
 
 #endif

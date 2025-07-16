@@ -2,12 +2,41 @@
 #include <thrust/execution_policy.h>
 #include <thrust/transform.h>
 
+constexpr int block_size = 768;
+constexpr int warp_size = 32;
+constexpr int block_size_2d = 16;
+constexpr unsigned int full_mask = 0xffffffff;
+
+__host__ int get_block_size_distance() { return block_size; }
+
+__host__ int get_grid_size_distance(int num_as) {
+  int num_blocks = num_blocks_max_occupancy(
+      min_distances_thread_per_a, block_size, sizeof(int2) * block_size, 0.5f);
+  return std::min(num_blocks, (num_as + block_size - 1) / block_size);
+}
+
+__host__ dim3 get_block_dims_distance_2d() {
+  uint block_dim = block_size_2d;
+  return dim3{block_dim, block_dim};
+}
+
+__host__ dim3 get_grid_dims_2d(int num_as, int num_bs) {
+  int num_blocks = num_blocks_max_occupancy(min_distances_thread_per_pair,
+                                            block_size_2d * block_size_2d,
+                                            sizeof(MinResult) * warp_size, 1.f);
+  num_blocks = std::min(num_blocks,
+                        (num_as * num_bs + block_size_2d * block_size_2d - 1) /
+                            block_size_2d * block_size_2d);
+  uint grid_dim = (uint)sqrt(num_blocks);
+  return dim3{grid_dim, grid_dim};
+}
+
 __device__ __forceinline__ MinResult
 single_warp_shuffle_reduction(MinResult min_result) {
-  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-    int new_distance = __shfl_down_sync(FULL_MASK, min_result.distance, offset);
-    int new_a_idx = __shfl_down_sync(FULL_MASK, min_result.a_idx, offset);
-    int new_b_idx = __shfl_down_sync(FULL_MASK, min_result.b_idx, offset);
+  for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+    int new_distance = __shfl_down_sync(full_mask, min_result.distance, offset);
+    int new_a_idx = __shfl_down_sync(full_mask, min_result.a_idx, offset);
+    int new_b_idx = __shfl_down_sync(full_mask, min_result.b_idx, offset);
     if (new_distance < min_result.distance) {
       min_result.distance = new_distance;
       min_result.a_idx = new_a_idx;
@@ -20,8 +49,8 @@ single_warp_shuffle_reduction(MinResult min_result) {
 __device__ __forceinline__ void warp_shuffle_reduction(MinResult min_result,
                                                        MinResult *smem,
                                                        MinResult *output) {
-  int lane = threadIdx.x % WARP_SIZE;
-  int warpID = threadIdx.x / WARP_SIZE;
+  int lane = threadIdx.x % warp_size;
+  int warpID = threadIdx.x / warp_size;
 
   // First warp reduction. All warps.
   min_result = single_warp_shuffle_reduction(min_result);
@@ -31,7 +60,7 @@ __device__ __forceinline__ void warp_shuffle_reduction(MinResult min_result,
 
   // Second warp reduction. First warp only.
   if (warpID == 0) {
-    if (lane < THREADS_PER_BLOCK / WARP_SIZE)
+    if (lane < block_size / warp_size)
       min_result = smem[lane];
     else
       min_result.distance = INT_MAX;
@@ -46,10 +75,8 @@ __device__ __forceinline__ void warp_shuffle_reduction(MinResult min_result,
 __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
                                                           MinResult *smem,
                                                           MinResult *output) {
-  int lane =
-      (threadIdx.x + BLOCK_SIZE_2D_DISTANCE * threadIdx.y) % THREADS_PER_BLOCK;
-  int warpID =
-      (threadIdx.x + BLOCK_SIZE_2D_DISTANCE * threadIdx.y) / THREADS_PER_BLOCK;
+  int lane = (threadIdx.x + block_size_2d * threadIdx.y) % warp_size;
+  int warpID = (threadIdx.x + block_size_2d * threadIdx.y) / warp_size;
 
   // First warp reduction. All warps.
   min_result = single_warp_shuffle_reduction(min_result);
@@ -59,8 +86,7 @@ __device__ __forceinline__ void warp_shuffle_reduction_2d(MinResult min_result,
 
   // Second warp reduction. First warp only.
   if (warpID == 0) {
-    if (lane <
-        BLOCK_SIZE_2D_DISTANCE * BLOCK_SIZE_2D_DISTANCE / THREADS_PER_BLOCK)
+    if (lane < block_size_2d * block_size_2d / warp_size)
       min_result = smem[lane];
     else
       min_result.distance = INT_MAX;
@@ -78,9 +104,9 @@ __global__ void final_reduction(MinResult *input, int num_elements,
   min_result.a_idx = -1;
   min_result.b_idx = -1;
   min_result.distance = INT_MAX;
-  __shared__ MinResult smem[WARP_SIZE];
+  __shared__ MinResult smem[warp_size];
 
-  for (int i = threadIdx.x; i < num_elements; i += THREADS_PER_BLOCK) {
+  for (int i = threadIdx.x; i < num_elements; i += block_size) {
     MinResult new_result = input[i];
     if (new_result.distance < min_result.distance)
       min_result = new_result;
@@ -92,13 +118,13 @@ __global__ void final_reduction(MinResult *input, int num_elements,
 __global__ void min_distances_thread_per_a_int2(
     const int2 *__restrict__ as, const int2 *__restrict__ bs, int num_as,
     int num_bs, int img_width, MinResult *block_results, bool order_swapped) {
-  int tid = threadIdx.x + THREADS_PER_BLOCK * blockIdx.x;
+  int tid = threadIdx.x + block_size * blockIdx.x;
   __shared__ union {
     struct {
-      int x[THREADS_PER_BLOCK];
-      int y[THREADS_PER_BLOCK];
+      int x[block_size];
+      int y[block_size];
     } bs_coords;
-    MinResult min_results[WARP_SIZE];
+    MinResult min_results[warp_size];
   } smem;
   int2 my_a, min_b = {-1, -1};
   int min_distance = INT_MAX;
@@ -108,10 +134,9 @@ __global__ void min_distances_thread_per_a_int2(
   }
   // Loop over all bs in blocks, loading into shared memory. Each thread finds
   // its closest b.
-  for (int b_block = 0;
-       b_block < (num_bs + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+  for (int b_block = 0; b_block < (num_bs + block_size - 1) / block_size;
        ++b_block) {
-    int b_idx = b_block * THREADS_PER_BLOCK + threadIdx.x;
+    int b_idx = b_block * block_size + threadIdx.x;
     if (b_idx < num_bs) {
       smem.bs_coords.x[threadIdx.x] = bs[b_idx].x;
       smem.bs_coords.y[threadIdx.x] = bs[b_idx].y;
@@ -119,8 +144,8 @@ __global__ void min_distances_thread_per_a_int2(
     __syncthreads();
 
     if (tid < num_as) {
-      for (int j = 0; j < THREADS_PER_BLOCK; ++j) {
-        if (b_block * THREADS_PER_BLOCK + j == num_bs)
+      for (int j = 0; j < block_size; ++j) {
+        if (b_block * block_size + j == num_bs)
           break;
         int b_x = smem.bs_coords.x[j];
         int b_y = smem.bs_coords.y[j];
@@ -152,13 +177,13 @@ __global__ void min_distances_thread_per_a_int2(
 __global__ void min_distances_thread_per_a(
     const int *__restrict__ as, const int *__restrict__ bs, int num_as,
     int num_bs, int img_width, MinResult *block_results, bool order_swapped) {
-  int tid = threadIdx.x + THREADS_PER_BLOCK * blockIdx.x;
+  int tid = threadIdx.x + block_size * blockIdx.x;
   __shared__ union {
-    int bs[THREADS_PER_BLOCK];
-    MinResult min_results[WARP_SIZE];
+    int bs[block_size];
+    MinResult min_results[warp_size];
   } smem;
-  __shared__ int s_b_xs[THREADS_PER_BLOCK];
-  __shared__ int s_b_ys[THREADS_PER_BLOCK];
+  __shared__ int s_b_xs[block_size];
+  __shared__ int s_b_ys[block_size];
   int my_a_linear_coord, min_b_linear_coord = -1, a_x, a_y,
                          min_distance = INT_MAX;
 
@@ -169,10 +194,9 @@ __global__ void min_distances_thread_per_a(
   }
   // Loop over all bs in blocks, loading into shared memory. Each thread finds
   // its closest b.
-  for (int b_block = 0;
-       b_block < (num_bs + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+  for (int b_block = 0; b_block < (num_bs + block_size - 1) / block_size;
        ++b_block) {
-    int b_idx = b_block * THREADS_PER_BLOCK + threadIdx.x;
+    int b_idx = b_block * block_size + threadIdx.x;
     if (b_idx < num_bs) {
       int b_linear_coord = bs[b_idx];
       smem.bs[threadIdx.x] = b_linear_coord;
@@ -182,8 +206,8 @@ __global__ void min_distances_thread_per_a(
     __syncthreads();
 
     if (tid < num_as) {
-      for (int j = 0; j < THREADS_PER_BLOCK; ++j) {
-        if (b_block * THREADS_PER_BLOCK + j == num_bs)
+      for (int j = 0; j < block_size; ++j) {
+        if (b_block * block_size + j == num_bs)
           break;
         int b_linear_coord = smem.bs[j];
         int b_x = s_b_xs[j];
@@ -238,15 +262,15 @@ __global__ void min_distances_thread_per_pair(const int2 *__restrict__ points_a,
   int min_distance = INT_MAX;
   int min_a_idx = -1;
   int min_b_idx = -1;
-  for (int x_idx = threadIdx.x + blockIdx.x * BLOCK_SIZE_2D_DISTANCE;
-       x_idx < num_as; x_idx += gridDim.x * BLOCK_SIZE_2D_DISTANCE) {
+  for (int x_idx = threadIdx.x + blockIdx.x * block_size_2d; x_idx < num_as;
+       x_idx += gridDim.x * block_size_2d) {
 
     int2 my_a;
     if (x_idx < num_as)
       my_a = points_a[x_idx];
 
-    for (int y_idx = threadIdx.y + blockIdx.y * BLOCK_SIZE_2D_DISTANCE;
-         y_idx < num_bs; y_idx += gridDim.y * BLOCK_SIZE_2D_DISTANCE) {
+    for (int y_idx = threadIdx.y + blockIdx.y * block_size_2d; y_idx < num_bs;
+         y_idx += gridDim.y * block_size_2d) {
 
       if (x_idx < num_as && y_idx < num_bs) {
         int2 my_b = points_b[y_idx];
@@ -262,7 +286,7 @@ __global__ void min_distances_thread_per_pair(const int2 *__restrict__ points_a,
     }
   }
 
-  __shared__ MinResult results[WARP_SIZE];
+  __shared__ MinResult results[warp_size];
   MinResult min_result{min_distance, min_a_idx, min_b_idx};
   warp_shuffle_reduction_2d(min_result, results, block_results);
 }

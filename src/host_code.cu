@@ -118,33 +118,17 @@ index_masks(const int *const h_image, int img_height, int img_width,
   CUDA_CHECK(cudaMemcpy(d_image, h_image, sizeof(int) * total_pixels,
                         cudaMemcpyHostToDevice));
 
-  // Find edges
-  int *d_edges;
-  CUDA_CHECK(cudaMalloc(&d_edges, sizeof(int) * total_pixels));
-  CUDA_CHECK(cudaMemset(d_edges, 0, sizeof(int) * total_pixels));
-  dim3 block_size(BLOCK_SIZE_EDGE_FIND_X, BLOCK_SIZE_EDGE_FIND_Y);
-  uint num_blocks_x =
-      (img_width + BLOCK_SIZE_EDGE_FIND_X - 2 - 1) / BLOCK_SIZE_EDGE_FIND_X - 2;
-  uint num_blocks_y =
-      (img_height + BLOCK_SIZE_EDGE_FIND_Y - 1) / BLOCK_SIZE_EDGE_FIND_Y;
-  dim3 grid_size(num_blocks_x, num_blocks_y);
-  find_edges<<<grid_size, block_size>>>(d_image, img_height, img_width,
-                                        d_edges);
-  CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaFree(d_image));
-
-  // Index shapes
+  // Find & index edges
+  dim3 block_dims = get_block_dims_indexing();
+  dim3 grid_dims = get_grid_dims_indexing(img_height, img_width);
   int *d_num_nonzeros;
   CUDA_CHECK(cudaMalloc(&d_num_nonzeros, sizeof(int)));
   CUDA_CHECK(cudaMemset(d_num_nonzeros, 0, sizeof(int)));
-
-  int num_blocks =
-      num_blocks_max_occupancy(find_nonzeros, THREADS_PER_BLOCK,
-                               sizeof(int) * 2 * TILE_SIZE_INDEXING, 1.5f);
-  find_nonzeros<<<num_blocks, THREADS_PER_BLOCK>>>(
-      d_edges, total_pixels, d_nonzero_idxs, d_nonzero_values, d_num_nonzeros);
+  index_edges<<<grid_dims, block_dims>>>(d_image, img_height, img_width,
+                                         d_nonzero_idxs, d_nonzero_values,
+                                         d_num_nonzeros);
   CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaFree(d_edges));
+  CUDA_CHECK(cudaFree(d_image));
 
   int h_num_nonzeros;
   CUDA_CHECK(cudaMemcpy(&h_num_nonzeros, d_num_nonzeros, sizeof(int),
@@ -160,7 +144,7 @@ index_masks(const int *const h_image, int img_height, int img_width,
 
 void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
                                   int *d_as, int *d_bs, MinResult &h_result,
-                                  cudaStream_t stream) {
+                                  cudaStream_t stream, bool use_kernel_1_int2) {
 
   // Kernel parallelizes over a's. Launch kernel with the larger mask as a.
   bool swapped = num_as < num_bs;
@@ -169,30 +153,31 @@ void launch_min_pair_thread_per_a(int num_as, int num_bs, const int img_width,
     std::swap(d_as, d_bs);
   }
 
-  int num_blocks =
-      num_blocks_max_occupancy(min_distances_thread_per_a, THREADS_PER_BLOCK,
-                               sizeof(int2) * THREADS_PER_BLOCK, 0.5f);
-  num_blocks = std::min(num_blocks,
-                        (num_as + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
-
+  int num_blocks = get_grid_size_distance(num_as);
+  int block_size = get_block_size_distance();
   MinResult *d_results;
   CUDA_CHECK(
       cudaMallocAsync(&d_results, sizeof(MinResult) * num_blocks, stream));
 
-  // int2 *d_points_a, *d_points_b;
-  // CUDA_CHECK(cudaMallocAsync(&d_points_a, sizeof(int2) * num_as, stream));
-  // CUDA_CHECK(cudaMallocAsync(&d_points_b, sizeof(int2) * num_bs, stream));
-  // make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b,
-  //             stream);
-
-  min_distances_thread_per_a<<<num_blocks, THREADS_PER_BLOCK, 0, stream>>>(
-      d_as, d_bs, num_as, num_bs, img_width, d_results, swapped);
+  if (use_kernel_1_int2) {
+    int2 *d_points_a, *d_points_b;
+    CUDA_CHECK(cudaMallocAsync(&d_points_a, sizeof(int2) * num_as, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_points_b, sizeof(int2) * num_bs, stream));
+    make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b,
+                stream);
+    min_distances_thread_per_a_int2<<<num_blocks, block_size, 0, stream>>>(
+        d_points_a, d_points_b, num_as, num_bs, img_width, d_results, swapped);
+    CUDA_CHECK(cudaFreeAsync(d_points_a, stream));
+    CUDA_CHECK(cudaFreeAsync(d_points_b, stream));
+  } else {
+    min_distances_thread_per_a<<<num_blocks, block_size, 0, stream>>>(
+        d_as, d_bs, num_as, num_bs, img_width, d_results, swapped);
+  }
   CUDA_CHECK(cudaGetLastError());
 
-  final_reduction<<<1, THREADS_PER_BLOCK, 0, stream>>>(d_results, num_blocks,
-                                                       d_results);
+  final_reduction<<<1, block_size, 0, stream>>>(d_results, num_blocks,
+                                                d_results);
   CUDA_CHECK(cudaGetLastError());
-
   CUDA_CHECK(cudaMemcpyAsync(&h_result, d_results, sizeof(MinResult),
                              cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaFreeAsync(d_results, stream));
@@ -203,18 +188,9 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
                                      MinResult &h_results,
                                      cudaStream_t stream) {
 
-  uint block_dim = BLOCK_SIZE_2D_DISTANCE;
-  dim3 block_size{block_dim, block_dim};
-  uint num_blocks = num_blocks_max_occupancy(
-      min_distances_thread_per_pair, block_dim * block_dim,
-      sizeof(MinResult) * WARP_SIZE, 1.f);
-  num_blocks =
-      std::min(num_blocks, (num_as * num_bs + block_dim * block_dim - 1) /
-                               block_dim * block_dim);
-
-  uint grid_dim = (uint)sqrt(num_blocks);
-  dim3 grid_size{grid_dim, grid_dim};
-  num_blocks = (int)grid_dim * (int)grid_dim;
+  dim3 block_dims = get_block_dims_distance_2d();
+  dim3 grid_dims = get_grid_dims_2d(num_as, num_bs);
+  int num_blocks = (int)grid_dims.x * (int)grid_dims.y;
 
   MinResult *d_results;
   CUDA_CHECK(
@@ -226,12 +202,13 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
   make_points(d_as, d_bs, num_as, num_bs, img_width, d_points_a, d_points_b,
               stream);
 
-  min_distances_thread_per_pair<<<grid_size, block_size, 0, stream>>>(
+  min_distances_thread_per_pair<<<grid_dims, block_dims, 0, stream>>>(
       d_points_a, d_points_b, num_as, num_bs, img_width, d_results);
   CUDA_CHECK(cudaGetLastError());
 
-  final_reduction<<<1, THREADS_PER_BLOCK, 0, stream>>>(d_results, num_blocks,
-                                                       d_results);
+  int block_size = get_block_size_distance();
+  final_reduction<<<1, block_size, 0, stream>>>(d_results, num_blocks,
+                                                d_results);
   CUDA_CHECK(cudaGetLastError());
 
   CUDA_CHECK(cudaMemcpyAsync(&h_results, d_results, sizeof(MinResult),
@@ -242,11 +219,11 @@ void launch_min_pair_thread_per_pair(const int num_as, const int num_bs,
 }
 
 void get_min_pairs(int *d_as, int *d_bs, int num_as, int num_bs, int img_width,
-                   MinResult &h_result, cudaStream_t stream,
-                   bool use_kernel_1) {
+                   MinResult &h_result, cudaStream_t stream, bool use_kernel_1,
+                   bool use_kernel_1_int2) {
   if (use_kernel_1) {
     launch_min_pair_thread_per_a(num_as, num_bs, img_width, d_as, d_bs,
-                                 h_result, stream);
+                                 h_result, stream, use_kernel_1_int2);
   } else {
     launch_min_pair_thread_per_pair(num_as, num_bs, img_width, d_as, d_bs,
                                     h_result, stream);
@@ -264,8 +241,9 @@ pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
   int num_mask_combinations = (num_unique_values * (num_unique_values - 1)) / 2;
   bool use_kernel_1 =
       !(num_mask_combinations < 6 && max_mask_size < 75 && num_nonzeros < 150);
+  bool user_kernel_1_int2 = num_mask_combinations == 1;
 
-  int num_streams = std::max(num_mask_combinations, 32);
+  int num_streams = std::min(num_mask_combinations, 32);
   vector<cudaStream_t> streams(num_streams);
   for (auto &stream : streams) {
     CUDA_CHECK(cudaStreamCreate(&stream));
@@ -288,7 +266,8 @@ pair_reductions(vector<int> unique_values, vector<int> mask_sizes,
       int *b_ptr = d_sorted_idxs + b_offset;
 
       get_min_pairs(a_ptr, b_ptr, num_as, num_bs, img_width, h_results[i][j],
-                    streams[stream_number % num_streams], use_kernel_1);
+                    streams[stream_number % num_streams], use_kernel_1,
+                    user_kernel_1_int2);
 
       b_offset += num_bs;
       ++stream_number;

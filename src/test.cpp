@@ -23,17 +23,21 @@ int main(int argc, char *argv[]) {
     else
       image[i] = 0;
   }
+  // image[0] = 1;
+  // image[1023] = 2;
+  // image[255 * 1024 + 255] = 1;
+  // image[255 * 1024 + 767] = 2;
+  // image[767 * 1024 + 255] = 3;
 
   // for (int i = 0; i < 10; ++i) {
   // get_pairs(image, img_size, img_size);
   // }
 
-  std::vector<std::vector<Pair>> pairs =
-      get_pairs(image, img_size, img_size);
+  std::vector<std::vector<Pair>> pairs = get_pairs(image, img_size, img_size);
 
   for (auto vec : pairs) {
     for (auto pair : vec) {
-      std::cout << pair.a;
+      std::cout << pair.to_string();
     }
   }
   // int img_size = 10;
@@ -58,7 +62,8 @@ int main(int argc, char *argv[]) {
   // uint num_blocks_x = (img_size + 30 - 1) / 30;
   // uint num_blocks_y = (img_size + 14 - 1) / 14;
   // dim3 grid_size(num_blocks_x, num_blocks_y);
-  // find_edges<<<grid_size, block_size>>>(d_image, img_size, img_size, d_output);
+  // find_edges<<<grid_size, block_size>>>(d_image, img_size, img_size,
+  // d_output);
 
   // int *output = new int[total_pixels];
   // for (int i = 0; i < total_pixels; ++i) {
