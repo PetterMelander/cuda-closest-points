@@ -13,7 +13,7 @@ int main(int argc, char *argv[]) {
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_real_distribution<> dis(0.0, 1.0);
-  std::uniform_int_distribution<> dis2(1, 32);
+  std::uniform_int_distribution<> dis2(1, 2);
 
   // Assign 10% to 1, 10% to 2, rest to 0
   for (int i = 0; i < total_pixels; ++i) {

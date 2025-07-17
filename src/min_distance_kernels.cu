@@ -2,7 +2,7 @@
 #include <thrust/execution_policy.h>
 #include <thrust/transform.h>
 
-constexpr int block_size = 768;
+constexpr int block_size = 512;
 constexpr int warp_size = 32;
 constexpr int block_size_2d = 16;
 constexpr unsigned int full_mask = 0xffffffff;
@@ -10,7 +10,9 @@ constexpr unsigned int full_mask = 0xffffffff;
 __host__ int get_block_size_distance() { return block_size; }
 
 __host__ int get_grid_size_distance(int num_as) {
-  return (num_as + block_size - 1) / block_size;
+  int num_blocks = num_blocks_max_occupancy(
+      min_distances_thread_per_a, block_size, sizeof(int2) * block_size, 1.f);
+  return std::min(num_blocks, (num_as + block_size - 1) / block_size);
 }
 
 __host__ dim3 get_block_dims_distance_2d() {
@@ -158,60 +160,68 @@ __global__ void final_reduction(MinResult *input, int num_elements,
 __global__ void min_distances_thread_per_a(
     const int *__restrict__ as, const int *__restrict__ bs, int num_as,
     int num_bs, int img_width, MinResult *block_results, bool order_swapped) {
-  int tid = threadIdx.x + block_size * blockIdx.x;
+
   __shared__ union {
     int bs[block_size];
     MinResult min_results[warp_size];
   } smem;
   __shared__ int s_b_xs[block_size];
   __shared__ int s_b_ys[block_size];
-  int my_a_linear_coord, min_b_linear_coord = -1, a_x, a_y,
-                         min_distance = INT_MAX;
 
-  if (tid < num_as) {
-    my_a_linear_coord = as[tid];
-    a_x = my_a_linear_coord % img_width;
-    a_y = my_a_linear_coord / img_width;
-  }
-  // Loop over all bs in blocks, loading into shared memory. Each thread finds
-  // its closest b.
-  for (int b_block = 0; b_block < (num_bs + block_size - 1) / block_size;
-       ++b_block) {
-    int b_idx = b_block * block_size + threadIdx.x;
-    if (b_idx < num_bs) {
-      int b_linear_coord = bs[b_idx];
-      smem.bs[threadIdx.x] = b_linear_coord;
-      s_b_xs[threadIdx.x] = b_linear_coord % img_width;
-      s_b_ys[threadIdx.x] = b_linear_coord / img_width;
-    }
+  int min_a_linear_coord, min_b_linear_coord = -1, min_distance = INT_MAX;
+
+  int tid = threadIdx.x + block_size * blockIdx.x;
+  for (int i = 0; i < num_as; i += block_size * gridDim.x) {
+    tid += i;
+    int my_a_linear_coord, a_x, a_y;
+
     __syncthreads();
-
     if (tid < num_as) {
-      for (int j = 0; j < block_size; ++j) {
-        if (b_block * block_size + j == num_bs)
-          break;
-        int b_linear_coord = smem.bs[j];
-        int b_x = s_b_xs[j];
-        int b_y = s_b_ys[j];
-        int dx = b_x - a_x;
-        int dy = b_y - a_y;
-        int distance = dx * dx + dy * dy;
-        if (distance < min_distance) {
-          min_distance = distance;
-          min_b_linear_coord = b_linear_coord;
+      my_a_linear_coord = as[tid];
+      a_x = my_a_linear_coord % img_width;
+      a_y = my_a_linear_coord / img_width;
+    }
+    // Loop over all bs in blocks, loading into shared memory. Each thread finds
+    // its closest b.
+    for (int b_block = 0; b_block < (num_bs + block_size - 1) / block_size;
+         ++b_block) {
+      int b_idx = b_block * block_size + threadIdx.x;
+      if (b_idx < num_bs) {
+        int b_linear_coord = bs[b_idx];
+        smem.bs[threadIdx.x] = b_linear_coord;
+        s_b_xs[threadIdx.x] = b_linear_coord % img_width;
+        s_b_ys[threadIdx.x] = b_linear_coord / img_width;
+      }
+      __syncthreads();
+
+      if (tid < num_as) {
+        for (int j = 0; j < block_size; ++j) {
+          if (b_block * block_size + j == num_bs)
+            break;
+
+          int b_linear_coord = smem.bs[j];
+          int dx = s_b_xs[j] - a_x;
+          int dy = s_b_ys[j] - a_y;
+          int distance = dx * dx + dy * dy;
+
+          if (distance < min_distance) {
+            min_distance = distance;
+            min_b_linear_coord = b_linear_coord;
+            min_a_linear_coord = my_a_linear_coord;
+          }
         }
       }
+      __syncthreads();
     }
-    __syncthreads();
   }
 
   MinResult min_result;
   min_result.distance = min_distance;
   if (order_swapped) {
     min_result.a_idx = min_b_linear_coord;
-    min_result.b_idx = my_a_linear_coord;
+    min_result.b_idx = min_a_linear_coord;
   } else {
-    min_result.a_idx = my_a_linear_coord;
+    min_result.a_idx = min_a_linear_coord;
     min_result.b_idx = min_b_linear_coord;
   }
   warp_shuffle_reduction(min_result, smem.min_results, block_results);
