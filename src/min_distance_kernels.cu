@@ -175,7 +175,6 @@ __global__ void min_distances_thread_per_a(
     tid += i;
     int my_a_linear_coord, a_x, a_y;
 
-    __syncthreads();
     if (tid < num_as) {
       my_a_linear_coord = as[tid];
       a_x = my_a_linear_coord % img_width;
