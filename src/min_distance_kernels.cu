@@ -157,7 +157,7 @@ __global__ void final_reduction(MinResult *input, int num_elements,
  * @param block_results Array of MinResults to write results to.
  * @param order_swapped Whether a and b have been swapped before kernel launch.
  */
-__global__ void min_distances_thread_per_a(
+__global__ __launch_bounds__(block_size) void min_distances_thread_per_a(
     const int *__restrict__ as, const int *__restrict__ bs, int num_as,
     int num_bs, int img_width, MinResult *block_results, bool order_swapped) {
 
